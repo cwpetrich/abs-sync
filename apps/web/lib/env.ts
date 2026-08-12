@@ -1,3 +1,4 @@
+import { parseBytes } from '@abs-sync/core';
 import {
   onSettingsChanged,
   resolve,
@@ -107,6 +108,29 @@ function number(key: SettingKey): number {
   return parsed;
 }
 
+/**
+ * A byte count, from either a plain number or a written size.
+ *
+ * Accepted in the environment as well as the UI, so `ABS_SYNC_MAX_ITEM_BYTES="25GB"`
+ * works and nobody has to count zeros in a `.env` either.
+ */
+function bytes(key: SettingKey): number {
+  const definition: SettingDefinition = SETTINGS[key];
+  const value = raw(key);
+  const fallback = () => parseBytes(definition.fallback() ?? '0') ?? 0;
+  if (value === null) return fallback();
+
+  const parsed = parseBytes(value);
+  const min = definition.min ?? 0;
+  if (parsed === null || parsed < min) {
+    console.error(
+      `[abs-sync] ${definition.envVar} is "${value}", which is not a size >= ${min} bytes. Using the default.`,
+    );
+    return fallback();
+  }
+  return parsed;
+}
+
 function text(key: SettingKey): string | null {
   return raw(key);
 }
@@ -136,8 +160,8 @@ export function getEnv(): AppEnv {
     maxConcurrentSyncs: number('maxConcurrentSyncs'),
     watchIntervalMinutes: number('watchIntervalMinutes'),
     fullReindexHours: number('fullReindexHours'),
-    maxItemSizeBytes: number('maxItemSizeBytes'),
-    spoolKeepBytes: number('spoolKeepBytes'),
+    maxItemSizeBytes: bytes('maxItemSizeBytes'),
+    spoolKeepBytes: bytes('spoolKeepBytes'),
     requireHttps: boolean('requireHttps'),
     mattermostUrl: text('mattermostUrl')?.replace(/\/+$/, '') ?? null,
     mattermostToken: text('mattermostToken'),

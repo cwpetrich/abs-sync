@@ -1,3 +1,4 @@
+import { formatBytes } from '@abs-sync/core';
 import { maskSecret } from '../../lib/crypto';
 import { prisma } from '../../lib/db';
 import { getEnv } from '../../lib/env';
@@ -49,7 +50,11 @@ export default async function SettingsPage() {
           ? ''
           : definition.kind === 'secret'
             ? maskSecret(value)
-            : value,
+            : // Stored canonically as bytes, shown as a size — the number is
+              // the machine's business, not the operator's.
+              definition.kind === 'bytes'
+              ? formatBytes(Number(value))
+              : value,
       ...('deferred' in definition && definition.deferred ? { deferred: true } : {}),
     };
   });

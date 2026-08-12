@@ -1,5 +1,6 @@
 'use client';
 
+import { formatBytes, parseBytes } from '@abs-sync/core';
 import { useState, useTransition } from 'react';
 import { updateSettingsAction } from '../actions';
 import { Callout, Pill } from '../components/ui';
@@ -18,7 +19,7 @@ export interface SettingView {
   key: string;
   label: string;
   hint: string;
-  kind: 'number' | 'text' | 'boolean' | 'url' | 'secret';
+  kind: 'number' | 'bytes' | 'text' | 'boolean' | 'url' | 'secret';
   group: string;
   envVar: string;
   source: 'database' | 'environment' | 'default';
@@ -103,6 +104,23 @@ function Field({
           />
         )}
       </div>
+
+      {/* Sizes echo back what was typed, resolved. "25 GB" and "25000000000"
+          look equally plausible in a box and differ by 7%, so the only way to
+          be sure which one you asked for is to be shown it. */}
+      {setting.kind === 'bytes' && value.trim() !== '' ? (
+        <p className="mt-1 text-xs">
+          {parseBytes(value) === null ? (
+            <span className="text-[var(--color-danger)]">
+              Not a size — try 25 GB, 500 MB, or 1.5 TB
+            </span>
+          ) : (
+            <span className="text-[var(--color-ink-muted)]">
+              = {formatBytes(parseBytes(value)!)} ({parseBytes(value)!.toLocaleString()} bytes)
+            </span>
+          )}
+        </p>
+      ) : null}
 
       <p className="mt-1 font-mono text-[11px] text-[var(--color-ink-faint)]">{setting.envVar}</p>
     </div>

@@ -316,3 +316,49 @@ export function formatBytes(bytes: number | null | undefined): string {
   }
   return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
+
+/** Multipliers for `parseBytes`, matching formatBytes' 1024-based steps. */
+const BYTE_UNITS: Record<string, number> = {
+  b: 1,
+  k: 1024,
+  kb: 1024,
+  kib: 1024,
+  m: 1024 ** 2,
+  mb: 1024 ** 2,
+  mib: 1024 ** 2,
+  g: 1024 ** 3,
+  gb: 1024 ** 3,
+  gib: 1024 ** 3,
+  t: 1024 ** 4,
+  tb: 1024 ** 4,
+  tib: 1024 ** 4,
+};
+
+/**
+ * Reads a human-written size into bytes, or null if it is not one.
+ *
+ * The inverse of `formatBytes`, so what the UI prints can be typed straight
+ * back in. Sizes are configuration people set by hand, and asking for
+ * 26843545600 invites an off-by-one-zero that silently changes the limit by a
+ * factor of ten. A bare number is still bytes, which keeps every existing
+ * config value working unchanged.
+ *
+ * KB and KiB are accepted as synonyms: both are 1024 here, matching
+ * `formatBytes` and the convention Audiobookshelf itself displays.
+ */
+export function parseBytes(input: string): number | null {
+  const trimmed = input.trim().toLowerCase().replace(/,/g, '');
+  if (!trimmed) return null;
+
+  const match = /^(\d+(?:\.\d+)?)\s*([a-z]*)$/.exec(trimmed);
+  if (!match) return null;
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount < 0) return null;
+
+  const unit = match[2] || 'b';
+  const multiplier = BYTE_UNITS[unit];
+  if (multiplier === undefined) return null;
+
+  return Math.round(amount * multiplier);
+}

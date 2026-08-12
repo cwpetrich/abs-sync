@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatBytes,
   normalizeAsin,
   normalizeIsbn,
   normalizePerson,
   normalizeSeries,
   normalizeTitle,
+  parseBytes,
   parseSequence,
   romanToInt,
 } from './normalize';
@@ -125,5 +127,40 @@ describe('identifiers', () => {
     expect(romanToInt('xiv')).toBe(14);
     expect(romanToInt('ix')).toBe(9);
     expect(romanToInt('abc')).toBeNull();
+  });
+});
+
+describe('parseBytes', () => {
+  it('reads the sizes a person would actually type', () => {
+    expect(parseBytes('25GB')).toBe(25 * 1024 ** 3);
+    expect(parseBytes('25 GB')).toBe(25 * 1024 ** 3);
+    expect(parseBytes('25gb')).toBe(25 * 1024 ** 3);
+    expect(parseBytes('1.5 TB')).toBe(1.5 * 1024 ** 4);
+    expect(parseBytes('500 MB')).toBe(500 * 1024 ** 2);
+  });
+
+  it('treats KB and KiB as the same 1024, matching formatBytes', () => {
+    expect(parseBytes('1 KB')).toBe(1024);
+    expect(parseBytes('1 KiB')).toBe(1024);
+    expect(parseBytes('1 GiB')).toBe(parseBytes('1 GB'));
+  });
+
+  it('still reads a bare number as bytes, so existing configs keep working', () => {
+    expect(parseBytes('26843545600')).toBe(26843545600);
+    expect(parseBytes('0')).toBe(0);
+  });
+
+  it('round-trips what formatBytes prints', () => {
+    for (const bytes of [1024, 500 * 1024 ** 2, 25 * 1024 ** 3, 2 * 1024 ** 4]) {
+      expect(parseBytes(formatBytes(bytes))).toBe(bytes);
+    }
+  });
+
+  it('rejects what is not a size', () => {
+    expect(parseBytes('')).toBeNull();
+    expect(parseBytes('lots')).toBeNull();
+    expect(parseBytes('25 parsecs')).toBeNull();
+    expect(parseBytes('-5GB')).toBeNull();
+    expect(parseBytes('25 GB extra')).toBeNull();
   });
 });

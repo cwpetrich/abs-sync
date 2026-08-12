@@ -114,6 +114,40 @@ describe('validation', () => {
   });
 });
 
+describe('sizes', () => {
+  it('accepts a written size and stores it as bytes', async () => {
+    await setSettings({ maxItemSizeBytes: '30 GB' });
+
+    // Canonical on the way in, so nothing downstream has to know about units.
+    expect(resolve('maxItemSizeBytes').value).toBe(String(30 * 1024 ** 3));
+    expect(getEnv().maxItemSizeBytes).toBe(30 * 1024 ** 3);
+  });
+
+  it('treats spacing and case as the same value, not as different rows', async () => {
+    await setSettings({ maxItemSizeBytes: '30GB' });
+    const compact = resolve('maxItemSizeBytes').value;
+    await setSettings({ maxItemSizeBytes: '30 gb' });
+    expect(resolve('maxItemSizeBytes').value).toBe(compact);
+  });
+
+  it('still accepts a bare byte count, so existing configs keep working', async () => {
+    await setSettings({ maxItemSizeBytes: '26843545600' });
+    expect(getEnv().maxItemSizeBytes).toBe(26843545600);
+  });
+
+  it('reads a written size from the environment too', () => {
+    process.env.ABS_SYNC_MAX_ITEM_BYTES = '2 TB';
+    resetEnvCache();
+    expect(getEnv().maxItemSizeBytes).toBe(2 * 1024 ** 4);
+    delete process.env.ABS_SYNC_MAX_ITEM_BYTES;
+    resetEnvCache();
+  });
+
+  it('explains itself when the size is not one', () => {
+    expect(validate('maxItemSizeBytes', 'big')).toMatch(/25 GB.*500 MB.*1\.5 TB/);
+  });
+});
+
 describe('secrets', () => {
   it('does not store a token in plaintext', async () => {
     await setSettings({ mattermostToken: 'super-secret-token-value' });

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { formatBytes, parseBytes } from '@abs-sync/core';
 import { decryptJson, encryptJson } from './crypto';
 
 /**
@@ -41,7 +42,7 @@ import { decryptJson, encryptJson } from './crypto';
  * not apply until restart.
  */
 
-export type SettingKind = 'number' | 'text' | 'boolean' | 'url' | 'secret';
+export type SettingKind = 'number' | 'bytes' | 'text' | 'boolean' | 'url' | 'secret';
 export type SettingGroup = 'transfers' | 'indexing' | 'notifications' | 'security';
 
 export interface SettingDefinition {
@@ -89,18 +90,18 @@ export const SETTINGS = {
   },
   maxItemSizeBytes: {
     envVar: 'ABS_SYNC_MAX_ITEM_BYTES',
-    kind: 'number',
+    kind: 'bytes',
     group: 'transfers',
-    label: 'Per-item size limit (bytes)',
-    hint: 'Refuse any single item larger than this, as a guard against runaway disk use.',
+    label: 'Per-item size limit',
+    hint: 'Refuse any single item larger than this, as a guard against runaway disk use. Write it as a size: 25 GB, 500 MB, 1.5 TB.',
     fallback: () => String(25 * 1024 * 1024 * 1024),
     min: 1,
   },
   spoolKeepBytes: {
     envVar: 'ABS_SYNC_SPOOL_KEEP_BYTES',
-    kind: 'number',
+    kind: 'bytes',
     group: 'transfers',
-    label: 'Retained downloads (bytes)',
+    label: 'Retained downloads',
     hint: 'Downloaded audio kept for transfers that have not succeeded, so a retry need not re-fetch it. 0 keeps nothing.',
     fallback: () => String(20 * 1024 * 1024 * 1024),
     min: 0,
@@ -241,6 +242,15 @@ export function validate(key: SettingKey, raw: string): string | null {
       if (parsed < min) return `${definition.label} must be at least ${min}`;
       return null;
     }
+    case 'bytes': {
+      const parsed = parseBytes(value);
+      if (parsed === null) {
+        return `${definition.label} must be a size like "25 GB", "500 MB" or "1.5 TB"`;
+      }
+      const min = definition.min ?? 0;
+      if (parsed < min) return `${definition.label} must be at least ${formatBytes(min)}`;
+      return null;
+    }
     case 'url': {
       let parsed: URL;
       try {
@@ -374,7 +384,12 @@ export async function setSettings(patch: Partial<Record<SettingKey, string>>): P
     }
 
     const definition: SettingDefinition = SETTINGS[key];
-    const stored = definition.kind === 'secret' ? encryptJson(value) : value;
+    // Sizes are stored canonically as a byte count, so everything that reads
+    // them keeps seeing a plain number and "25 GB" and "25GB" cannot end up as
+    // two different-looking rows meaning the same thing.
+    const normalized =
+      definition.kind === 'bytes' ? String(parseBytes(value)) : value;
+    const stored = definition.kind === 'secret' ? encryptJson(value) : normalized;
     await prisma.appSetting.upsert({
       where: { key: dbKey },
       create: { key: dbKey, value: stored },

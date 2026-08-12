@@ -208,8 +208,8 @@ See `apps/web/.env.example` for the environment names.
 | `ABS_SYNC_VAPID_SUBJECT` | Contact address the push services use to reach you. |
 | `ABS_SYNC_PUBLIC_URL` | Absolute URL used for links inside notifications. |
 | `ABS_SYNC_NOTIFY_DIGEST_SECONDS` | Window over which routine notifications are batched (default 30). |
-| `ABS_SYNC_MAX_ITEM_BYTES` | Refuse any single item larger than this (default 25 GiB). |
-| `ABS_SYNC_SPOOL_KEEP_BYTES` | Downloaded audio kept for not-yet-successful transfers so retries do not re-fetch it (default 20 GiB; 0 disables). |
+| `ABS_SYNC_MAX_ITEM_BYTES` | Refuse any single item larger than this. A size like `25 GB`, or bytes (default 25 GB). |
+| `ABS_SYNC_SPOOL_KEEP_BYTES` | Downloaded audio kept for not-yet-successful transfers so retries do not re-fetch it. A size like `20 GB` (0 disables). |
 | `ABS_SYNC_REQUIRE_HTTPS` | Reject plain-http server URLs except localhost. |
 
 > **There is no login.** abs-sync is a single-tenant admin tool that holds credentials for every
@@ -391,7 +391,7 @@ would silently unsubscribe a device because the push service had a bad afternoon
 ## Verification
 
 ```bash
-npm test          # 183 tests across the three workspaces
+npm test          # 193 tests across the three workspaces
 npm run typecheck
 npm run build
 ```
@@ -476,7 +476,7 @@ yet be retried:
   spool; the one file that was mid-write fails verification and is re-fetched while the rest are not.
   Measured by hard-killing the server mid-transfer: **671 MB of 1.1 GB was reused** across two books,
   27 of 40 files and 26 of 42.
-- **Retention is bounded.** `ABS_SYNC_SPOOL_KEEP_BYTES` (default 20 GiB) caps how much is held for
+- **Retention is bounded.** `ABS_SYNC_SPOOL_KEEP_BYTES` (default 20 GB) caps how much is held for
   transfers that have not succeeded, evicting the longest-idle failed job first. The budget is
   re-checked every few minutes while running, not only at startup.
 - **The spool does not live in `/tmp`.** It defaults to `apps/web/spool/` (gitignored). `/tmp` is
