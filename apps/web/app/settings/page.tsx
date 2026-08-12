@@ -1,9 +1,11 @@
-import { formatBytes } from '@abs-sync/core';
+import { maskSecret } from '../../lib/crypto';
 import { prisma } from '../../lib/db';
 import { getEnv } from '../../lib/env';
 import { mattermostMode } from '../../lib/notify-mattermost';
+import { resolve, SETTING_KEYS, SETTINGS } from '../../lib/settings';
 import { Callout, LocalTime, PageHeader, Pill } from '../components/ui';
 import { NotificationsPanel } from './notifications-panel';
+import { SettingsForm, type SettingView } from './settings-form';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,6 +29,35 @@ export default async function SettingsPage() {
   } catch (error) {
     envError = error instanceof Error ? error.message : String(error);
   }
+
+  // Secrets are masked here, on the server: the form needs to show that a token
+  // exists and roughly which one, but the value itself has no business being
+  // serialised into a page. Saving a blank secret field leaves it untouched.
+  const settingViews: SettingView[] = SETTING_KEYS.map((key) => {
+    const definition = SETTINGS[key];
+    const { value, source } = resolve(key);
+    return {
+      key,
+      label: definition.label,
+      hint: definition.hint,
+      kind: definition.kind,
+      group: definition.group,
+      envVar: definition.envVar,
+      source,
+      display:
+        value === null
+          ? ''
+          : definition.kind === 'secret'
+            ? maskSecret(value)
+            : value,
+      ...('deferred' in definition && definition.deferred ? { deferred: true } : {}),
+    };
+  });
+
+  const allowedOrigins = (process.env.ABS_SYNC_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 
   const [indexRuns, itemCount, jobCount, subscriptionCount] = await Promise.all([
     prisma.indexRun.findMany({
@@ -57,41 +88,26 @@ export default async function SettingsPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <section>
           <h2 className="mb-2 text-sm font-medium text-[var(--color-ink-muted)]">Configuration</h2>
+          <SettingsForm settings={settingViews} />
+
+          <h2 className="mb-2 mt-6 text-sm font-medium text-[var(--color-ink-muted)]">
+            Fixed at startup
+          </h2>
           <div className="card overflow-hidden">
             <Row
               label="Database"
               value={env?.databaseUrl ?? '—'}
-              hint="DATABASE_URL — SQLite file holding servers, index and jobs"
+              hint="DATABASE_URL — where these settings themselves are stored, so it cannot live in them"
             />
             <Row
               label="Credential encryption"
               value={env ? <Pill tone="ok">configured</Pill> : <Pill tone="danger">missing</Pill>}
-              hint="ABS_SYNC_SECRET — AES-256-GCM key material for stored credentials"
+              hint="ABS_SYNC_SECRET — encrypts stored credentials, including the secrets above, so it cannot be one of them"
             />
             <Row
-              label="Spool directory"
-              value={env?.spoolDir ?? '—'}
-              hint="ABS_SYNC_SPOOL_DIR — needs room for the largest item you sync"
-            />
-            <Row
-              label="Concurrent transfers"
-              value={env?.maxConcurrentSyncs ?? '—'}
-              hint="ABS_SYNC_MAX_CONCURRENT"
-            />
-            <Row
-              label="Watch interval"
-              value={env ? `${env.watchIntervalMinutes} min` : '—'}
-              hint="ABS_SYNC_WATCH_INTERVAL_MINUTES — how often watched series are re-checked"
-            />
-            <Row
-              label="Per-item size limit"
-              value={env ? formatBytes(env.maxItemSizeBytes) : '—'}
-              hint="ABS_SYNC_MAX_ITEM_BYTES — transfers larger than this are refused"
-            />
-            <Row
-              label="Require HTTPS"
-              value={env?.requireHttps ? 'yes' : 'no'}
-              hint="ABS_SYNC_REQUIRE_HTTPS — reject plain-http server URLs except localhost"
+              label="Allowed origins"
+              value={allowedOrigins.length > 0 ? allowedOrigins.join(', ') : '— localhost only —'}
+              hint="ABS_SYNC_ALLOWED_ORIGINS — read by next.config.ts while the server boots, before a database exists"
             />
           </div>
 

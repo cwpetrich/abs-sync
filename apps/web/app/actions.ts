@@ -1,11 +1,12 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { describeError } from '../lib/activity';
+import { describeError, logActivity } from '../lib/activity';
 import { prisma } from '../lib/db';
 import { getEnv } from '../lib/env';
 import { getIndexManager } from '../lib/index-manager';
 import { deliver, isEnabled as isNotifyEnabled } from '../lib/notify';
+import { setSettings, SETTING_KEYS, type SettingKey } from '../lib/settings';
 import { getScheduler } from '../lib/scheduler';
 import {
   createServer,
@@ -367,6 +368,44 @@ export async function checkWatchNowAction(
         candidates: evaluation.candidates,
       },
     };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+// ------------------------------------------------------------------- settings
+
+/**
+ * Saves configuration changes.
+ *
+ * An empty value clears the override so the environment variable or built-in
+ * default applies again — that is what the per-field reset sends. Changes take
+ * effect immediately: the worker reads its limits once per tick, and the
+ * scheduler is told to re-arm because `setInterval` fixes its period when it is
+ * created.
+ */
+export async function updateSettingsAction(
+  patch: Record<string, string>,
+): Promise<ActionResult> {
+  try {
+    const known = Object.fromEntries(
+      Object.entries(patch).filter(([key]) => (SETTING_KEYS as string[]).includes(key)),
+    ) as Partial<Record<SettingKey, string>>;
+
+    await setSettings(known);
+    getScheduler().reschedule();
+
+    const changed = Object.keys(known);
+    await logActivity(
+      'system',
+      `Settings updated: ${changed.join(', ')}`,
+      // Values are deliberately not logged — several are credentials, and the
+      // activity trail is rendered in a UI with no access control.
+      { data: { keys: changed } },
+    );
+
+    revalidatePath('/settings');
+    return { ok: true };
   } catch (error) {
     return fail(error);
   }

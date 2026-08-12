@@ -1,9 +1,20 @@
-import path from 'node:path';
+import {
+  onSettingsChanged,
+  resolve,
+  SETTINGS,
+  type SettingDefinition,
+  type SettingKey,
+} from './settings';
 
 /**
  * Server-only configuration. Reading these on the client would leak the
  * credential secret, so this module must never be imported from a component
  * that runs in the browser.
+ *
+ * Only two values are read straight from the environment. Everything else
+ * resolves through `lib/settings.ts`, which layers a database override over the
+ * environment variable over a built-in default — see that file for why those
+ * two cannot join them.
  */
 
 function requireEnv(name: string): string {
@@ -16,45 +27,13 @@ function requireEnv(name: string): string {
   return value.trim();
 }
 
-function optionalNumber(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${name} must be a positive number, got "${raw}"`);
-  }
-  return parsed;
-}
-
-/**
- * An absolute http(s) URL, or null when unset.
- *
- * Validated at load rather than at send time: a typo'd webhook is otherwise
- * invisible until the moment something goes wrong and the alert about it also
- * fails to arrive.
- */
-function optionalUrl(name: string): string | null {
-  const raw = process.env[name]?.trim();
-  if (!raw) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error(`${name} must be an absolute URL, got "${raw}"`);
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`${name} must be http or https, got "${parsed.protocol}"`);
-  }
-  return raw;
-}
-
 const MIN_SECRET_LENGTH = 32;
 
 let cached: AppEnv | null = null;
 
 export interface AppEnv {
   databaseUrl: string;
-  /** Master secret for credential encryption at rest. */
+  /** Master secret for credential encryption at rest. Environment-only. */
   secret: string;
   /** Where in-flight downloads are spooled before upload. */
   spoolDir: string;
@@ -79,49 +58,61 @@ export interface AppEnv {
   /** Reject non-HTTPS server URLs (except localhost) when true. */
   requireHttps: boolean;
 
-  /**
-   * Base URL of a Mattermost server, for posting through the REST API with a
-   * bot or personal access token. Preferred over the webhook when set, because
-   * it is configured by channel name and one token can serve several channels.
-   */
+  /** Base URL of a Mattermost server, for posting through the REST API. */
   mattermostUrl: string | null;
   /** Bot or personal access token. A credential: it can post as its account. */
   mattermostToken: string | null;
   /** Team the channel lives in — the `<team>` in /<team>/channels/<channel>. */
   mattermostTeam: string | null;
-  /**
-   * Incoming-webhook URL for a Mattermost channel. Used when no API token is
-   * configured. Null disables the transport; notifications simply are not sent
-   * rather than erroring.
-   */
+  /** Incoming-webhook URL, used when no API token is configured. */
   mattermostWebhookUrl: string | null;
-  /**
-   * Channel *name* (not display name) to post into. Required for the API
-   * transport; optional for the webhook, where it overrides the channel the
-   * webhook was created against.
-   */
+  /** Channel name to post into. Required for the API, optional for a webhook. */
   mattermostChannel: string | null;
-  /**
-   * VAPID keypair identifying this server to the browser push services. Both
-   * halves must be present for browser notifications to work at all; generate
-   * them with `npm run notify:keys`.
-   */
+  /** VAPID keypair identifying this server to the browser push services. */
   vapidPublicKey: string | null;
   vapidPrivateKey: string | null;
   /** Contact address the push services use to reach the operator. */
   vapidSubject: string;
-  /**
-   * Absolute base URL this app is reached at, used to build links inside
-   * notifications. A notification arriving on a phone is useless if tapping it
-   * opens a hostname only the server can resolve.
-   */
+  /** Absolute base URL used to build links inside notifications. */
   publicUrl: string | null;
-  /**
-   * Window over which routine notifications are batched into one message. A
-   * single watch pass can queue a dozen books; sending one push per book turns
-   * a useful signal into something you mute.
-   */
+  /** Window over which routine notifications are batched into one message. */
   notifyDigestSeconds: number;
+}
+
+/** The effective string value for a setting, from whichever tier supplies it. */
+function raw(key: SettingKey): string | null {
+  return resolve(key).value;
+}
+
+/**
+ * A number from the resolved tiers.
+ *
+ * A malformed value falls back rather than throwing. The form validates on
+ * write, so the only way to reach this is an environment variable typed by
+ * hand — and taking down a running transfer worker over one bad number is a
+ * worse outcome than carrying on with the default and saying so.
+ */
+function number(key: SettingKey): number {
+  const definition: SettingDefinition = SETTINGS[key];
+  const value = raw(key);
+  if (value === null) return Number(definition.fallback() ?? 0);
+  const parsed = Number(value);
+  const min = definition.min ?? 1;
+  if (!Number.isFinite(parsed) || parsed < min) {
+    console.error(
+      `[abs-sync] ${definition.envVar} is "${value}", which is not a number >= ${min}. Using the default.`,
+    );
+    return Number(definition.fallback() ?? 0);
+  }
+  return parsed;
+}
+
+function text(key: SettingKey): string | null {
+  return raw(key);
+}
+
+function boolean(key: SettingKey): boolean {
+  return raw(key) === 'true';
 }
 
 export function getEnv(): AppEnv {
@@ -138,32 +129,34 @@ export function getEnv(): AppEnv {
   cached = {
     databaseUrl: requireEnv('DATABASE_URL'),
     secret,
-    // Deliberately not os.tmpdir(): downloaded audio is now retained across
+    // Deliberately not os.tmpdir(): downloaded audio is retained across
     // restarts so a retry need not re-fetch it, and /tmp is cleared on reboot on
-    // most Linux systems (`D /tmp ... 30d` in tmpfiles.d), which would silently
-    // throw that cache away. `spool/` is already gitignored.
-    spoolDir: process.env.ABS_SYNC_SPOOL_DIR?.trim() || path.resolve(process.cwd(), 'spool'),
-    maxConcurrentSyncs: optionalNumber('ABS_SYNC_MAX_CONCURRENT', 2),
-    watchIntervalMinutes: optionalNumber('ABS_SYNC_WATCH_INTERVAL_MINUTES', 60),
-    fullReindexHours: optionalNumber('ABS_SYNC_FULL_REINDEX_HOURS', 24),
-    maxItemSizeBytes: optionalNumber('ABS_SYNC_MAX_ITEM_BYTES', 25 * 1024 * 1024 * 1024),
-    spoolKeepBytes: optionalNumber('ABS_SYNC_SPOOL_KEEP_BYTES', 20 * 1024 * 1024 * 1024),
-    requireHttps: process.env.ABS_SYNC_REQUIRE_HTTPS === 'true',
-    mattermostUrl: optionalUrl('ABS_SYNC_MATTERMOST_URL')?.replace(/\/+$/, '') ?? null,
-    mattermostToken: process.env.ABS_SYNC_MATTERMOST_TOKEN?.trim() || null,
-    mattermostTeam: process.env.ABS_SYNC_MATTERMOST_TEAM?.trim() || null,
-    mattermostWebhookUrl: optionalUrl('ABS_SYNC_MATTERMOST_WEBHOOK_URL'),
-    mattermostChannel: process.env.ABS_SYNC_MATTERMOST_CHANNEL?.trim() || null,
-    vapidPublicKey: process.env.ABS_SYNC_VAPID_PUBLIC_KEY?.trim() || null,
-    vapidPrivateKey: process.env.ABS_SYNC_VAPID_PRIVATE_KEY?.trim() || null,
-    vapidSubject: process.env.ABS_SYNC_VAPID_SUBJECT?.trim() || 'mailto:abs-sync@localhost',
-    publicUrl: optionalUrl('ABS_SYNC_PUBLIC_URL')?.replace(/\/+$/, '') ?? null,
-    notifyDigestSeconds: optionalNumber('ABS_SYNC_NOTIFY_DIGEST_SECONDS', 30),
+    // most Linux systems, which would silently throw that cache away.
+    spoolDir: text('spoolDir')!,
+    maxConcurrentSyncs: number('maxConcurrentSyncs'),
+    watchIntervalMinutes: number('watchIntervalMinutes'),
+    fullReindexHours: number('fullReindexHours'),
+    maxItemSizeBytes: number('maxItemSizeBytes'),
+    spoolKeepBytes: number('spoolKeepBytes'),
+    requireHttps: boolean('requireHttps'),
+    mattermostUrl: text('mattermostUrl')?.replace(/\/+$/, '') ?? null,
+    mattermostToken: text('mattermostToken'),
+    mattermostTeam: text('mattermostTeam'),
+    mattermostWebhookUrl: text('mattermostWebhookUrl'),
+    mattermostChannel: text('mattermostChannel'),
+    vapidPublicKey: text('vapidPublicKey'),
+    vapidPrivateKey: text('vapidPrivateKey'),
+    vapidSubject: text('vapidSubject')!,
+    publicUrl: text('publicUrl')?.replace(/\/+$/, '') ?? null,
+    notifyDigestSeconds: number('notifyDigestSeconds'),
   };
   return cached;
 }
 
-/** Test hook: forces the next getEnv() to re-read process.env. */
+/** Forces the next getEnv() to re-read the environment and stored settings. */
 export function resetEnvCache(): void {
   cached = null;
 }
+
+// Saving a setting has to be visible to the worker mid-run, not at next boot.
+onSettingsChanged(resetEnvCache);

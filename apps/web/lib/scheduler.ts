@@ -32,6 +32,9 @@ export class Scheduler {
     return this.lastRun;
   }
 
+  /** The interval the current timer was created with, in ms. */
+  private timerIntervalMs: number | null = null;
+
   start(): void {
     if (this.timer) return;
     const intervalMs = getEnv().watchIntervalMinutes * 60_000;
@@ -39,13 +42,33 @@ export class Scheduler {
       void this.runNow();
     }, intervalMs);
     this.timer.unref?.();
+    this.timerIntervalMs = intervalMs;
     // No immediate run on boot: a restart loop would otherwise hammer every
     // remote server. The first pass happens one interval in.
+  }
+
+  /**
+   * Picks up a changed interval without a restart.
+   *
+   * `setInterval` fixes its period at creation, so a interval edited in
+   * Settings would otherwise keep firing at the old rate until the process
+   * restarted — the exact "I changed it and nothing happened" this app tries
+   * to avoid. Rescheduling restarts the countdown, which is also why it is a
+   * no-op when the interval has not actually changed: repeatedly saving an
+   * unrelated setting would otherwise keep postponing the next pass forever.
+   */
+  reschedule(): void {
+    if (!this.timer) return;
+    const intervalMs = getEnv().watchIntervalMinutes * 60_000;
+    if (intervalMs === this.timerIntervalMs) return;
+    this.stop();
+    this.start();
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.timerIntervalMs = null;
   }
 
   /** Runs a pass now. Concurrent calls collapse into the in-flight one. */

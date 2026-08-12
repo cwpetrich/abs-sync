@@ -10,8 +10,14 @@ export async function register(): Promise<void> {
 
   const { getWorker } = await import('./lib/sync-worker');
   const { getScheduler } = await import('./lib/scheduler');
+  const { loadSettings } = await import('./lib/settings');
 
   try {
+    // Before anything reads configuration: the worker's concurrency limit and
+    // the scheduler's interval are both read at start(), so loading overrides
+    // afterwards would run the first pass on environment defaults.
+    await loadSettings();
+
     getWorker().start();
     getScheduler().start();
     console.log('[abs-sync] transfer worker and watch scheduler started');

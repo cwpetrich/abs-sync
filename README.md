@@ -156,8 +156,42 @@ abs-sync`) if you are going to exercise transfers by hand.
 
 ### Configuration
 
-All configuration is environment variables, so a container deployment stays reproducible. See
-`apps/web/.env.example`; the **Settings** page shows the live values.
+Settings are edited live on the **Settings** page and take effect immediately — no restart, which
+matters when a restart means interrupting a transfer. Values resolve in three tiers:
+
+```
+database override  →  environment variable  →  built-in default
+```
+
+The database wins, so the UI is authoritative once you touch a setting. The environment is still
+read, so an existing `.env` keeps working untouched and a fresh container comes up configured before
+anyone opens the UI. Every field names the tier its current value came from, because otherwise "I set
+that in `.env` and nothing happened" is a confusion this design invites. Clearing a field deletes the
+override and falls back to the tier underneath, rather than storing an empty value.
+
+Secret-valued settings — the Mattermost token and webhook URL, the VAPID private key — are encrypted
+with the same AES-256-GCM envelope as server credentials, and are masked rather than sent to the
+browser. Saving a blank secret field leaves the stored value alone; a password box should never read
+an empty field as "erase".
+
+**Three settings stay in the environment**, for reasons that are structural rather than stylistic:
+
+| | Why it cannot be a live setting |
+| --- | --- |
+| `ABS_SYNC_SECRET` | It is the key that encrypts credentials *in this database*, including the secret settings above. Storing it beside its own ciphertext would make the encryption ornamental. |
+| `DATABASE_URL` | It is how the settings are found in the first place. |
+| `ABS_SYNC_ALLOWED_ORIGINS` | `next.config.ts` reads it while the server boots, well before a database connection exists. Offering it as a live setting would mean a field that silently does nothing until restart. |
+
+`getEnv()` stays synchronous — it is called from 28 places including once per worker tick, and making
+it async to await a query would put a database round trip on a hot path. So overrides load into
+memory once at boot and refresh whenever they are written. That is safe for a single process; a
+second instance against the same database would not see the first's changes until its own reload.
+
+One thing does not re-read itself: `setInterval` fixes its period when created, so the scheduler is
+explicitly re-armed after a save. It skips re-arming when the interval is unchanged, since restarting
+the countdown on every unrelated save would postpone the next pass indefinitely.
+
+See `apps/web/.env.example` for the environment names.
 
 | Variable | Purpose |
 | --- | --- |
@@ -357,7 +391,7 @@ would silently unsubscribe a device because the push service had a bad afternoon
 ## Verification
 
 ```bash
-npm test          # 169 tests across the three workspaces
+npm test          # 183 tests across the three workspaces
 npm run typecheck
 npm run build
 ```
