@@ -1,0 +1,13 @@
+{
+  "name": "abs-sync",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/*", "packages/*"],
+  "engines": { "node": ">=20.11" },
+  "scripts": {
+    "dev": "npm run dev -w @abs-sync/web",
+    "build": "npm run build -w @abs-sync/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}

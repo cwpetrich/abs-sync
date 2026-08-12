@@ -1,0 +1,299 @@
+// abs-sync persistence schema.
+//
+// Byte counts are Float rather than BigInt on purpose: Float64 represents
+// integers exactly up to 2^53 (~9 PB), which is far beyond any audiobook, and it
+// avoids BigInt's JSON-serialization problems when data crosses the
+// server-component boundary into React.
+
+generator client {
+  provider = "prisma-client"
+  // Outside app/ so Next never walks it as part of the route tree.
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// A remote (or local) Audiobookshelf server we hold credentials for.
+model Server {
+  id      String @id @default(cuid())
+  name    String
+  baseUrl String
+
+  /// "apiKey" | "password"
+  authKind String
+  /// AES-256-GCM ciphertext of the credential JSON. Never leaves the server.
+  secretCipher String
+  /// Encrypted bearer token cached from a password login, to skip re-auth.
+  tokenCipher String?
+
+  /// Marks the server this app syncs *into*. Exactly one should be true.
+  isTarget Boolean @default(false)
+  enabled  Boolean @default(true)
+
+  serverVersion String?
+  /// Display-only; the real credential lives in secretCipher.
+  accountLabel  String?
+  canDownload   Boolean @default(false)
+  canUpload     Boolean @default(false)
+  isAdmin       Boolean @default(false)
+
+  lastVerifiedAt DateTime?
+  lastIndexedAt  DateTime?
+  /// Last time a FULL crawl reconciled this server. Incremental runs cannot
+  /// detect deletions, so a periodic full pass is what keeps the index honest.
+  lastFullIndexAt DateTime?
+  /// Sort key this server was observed to honour for newest-first listing,
+  /// learned at runtime. Null means not yet known or not supported.
+  itemSortField  String?
+  lastError      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  libraries    Library[]
+  items        IndexedItem[]
+  indexRuns    IndexRun[]
+  sourceJobs   SyncJob[]     @relation("JobSource")
+  targetJobs   SyncJob[]     @relation("JobTarget")
+  watchTargets SeriesWatch[] @relation("WatchTarget")
+
+  @@unique([baseUrl, name])
+}
+
+/// A library on a server, plus whether it participates in comparisons.
+model Library {
+  id       String @id @default(cuid())
+  serverId String
+  server   Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  /// The library id as Audiobookshelf knows it.
+  absId     String
+  name      String
+  mediaType String?
+  /// JSON array of { id, fullPath } upload targets reported by ABS.
+  foldersJson String @default("[]")
+
+  /// When false this library is ignored by indexing and diffing.
+  included Boolean @default(true)
+
+  itemCount     Int       @default(0)
+  lastIndexedAt DateTime?
+
+  items    IndexedItem[]
+  watches  SeriesWatch[] @relation("WatchLibrary")
+  jobs     SyncJob[]     @relation("JobTargetLibrary")
+
+  @@unique([serverId, absId])
+}
+
+/// A cached, normalized snapshot of one book on one server.
+model IndexedItem {
+  id String @id @default(cuid())
+
+  serverId  String
+  server    Server  @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  libraryId String
+  library   Library @relation(fields: [libraryId], references: [id], onDelete: Cascade)
+
+  absItemId String
+
+  title         String
+  subtitle      String?
+  authorsJson   String  @default("[]")
+  narratorsJson String  @default("[]")
+  seriesJson    String  @default("[]")
+
+  asin          String?
+  isbn          String?
+  publishedYear String?
+  publisher     String?
+  language      String?
+
+  durationSec   Float?
+  sizeBytes     Float?
+  numAudioFiles Int?
+
+  hasAudio Boolean @default(true)
+  hasEbook Boolean @default(false)
+  explicit Boolean @default(false)
+
+  absUpdatedAt DateTime?
+  /// Source-side sort timestamps, epoch millis. Incremental indexing compares
+  /// against whichever of these matches the sort key the server honours.
+  absMtimeMs   Float?
+  absAddedAt   Float?
+
+  /// Denormalized normalization output, so SQL can prefilter before scoring.
+  normTitle  String
+  normAuthor String  @default("")
+  normSeries String?
+
+  /// Bumped on every index run; rows not seen in the latest run are pruned.
+  seenAt DateTime @default(now())
+
+  @@unique([serverId, absItemId])
+  @@index([libraryId])
+  @@index([normTitle])
+  @@index([normSeries])
+  @@index([asin])
+  @@index([libraryId, absMtimeMs])
+  @@index([libraryId, absAddedAt])
+}
+
+/// One indexing pass over a server.
+model IndexRun {
+  id       String @id @default(cuid())
+  serverId String
+  server   Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  /// "running" | "completed" | "failed" | "canceled"
+  status       String    @default("running")
+  /// "full" | "incremental"
+  mode         String    @default("full")
+  itemsIndexed Int       @default(0)
+  itemsRemoved Int       @default(0)
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  error        String?
+
+  @@index([serverId, startedAt])
+}
+
+/// A queued or completed book transfer from one server into the target.
+model SyncJob {
+  id String @id @default(cuid())
+
+  /// "queued" | "running" | "failed" | "completed" | "canceled"
+  status String @default("queued")
+  /// "pending" | "downloading" | "uploading" | "finalizing"
+  phase  String @default("pending")
+
+  sourceServerId  String
+  sourceServer    Server @relation("JobSource", fields: [sourceServerId], references: [id], onDelete: Cascade)
+  sourceItemId    String
+  sourceLibraryId String
+
+  targetServerId  String
+  targetServer    Server  @relation("JobTarget", fields: [targetServerId], references: [id], onDelete: Cascade)
+  targetLibraryId String
+  targetLibrary   Library @relation("JobTargetLibrary", fields: [targetLibraryId], references: [id], onDelete: Cascade)
+  targetFolderId  String
+
+  title  String
+  author String?
+  series String?
+
+  /// Normalized identity of the work. Used to stop the same book being queued
+  /// twice from two different source servers before the target is re-indexed.
+  normTitle  String @default("")
+  normAuthor String @default("")
+
+  totalBytes      Float?
+  downloadedBytes Float  @default(0)
+  uploadedBytes   Float  @default(0)
+
+  attempts    Int     @default(0)
+  maxAttempts Int     @default(3)
+  error       String?
+  /// Temp file holding the downloaded payload while the upload runs.
+  spoolPath   String?
+  /// Item id created on the target, when the upload reports one.
+  resultItemId String?
+
+  /// "manual" | "watch"
+  origin  String  @default("manual")
+  watchId String?
+  watch   SeriesWatch? @relation(fields: [watchId], references: [id], onDelete: SetNull)
+
+  createdAt  DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([sourceServerId, sourceItemId, targetServerId])
+  @@index([targetServerId, normTitle, normAuthor])
+}
+
+/// A series marked for automatic syncing into the target library.
+model SeriesWatch {
+  id String @id @default(cuid())
+
+  seriesName String
+  normSeries String
+  /// Optional author constraint, for series names that collide.
+  author     String?
+
+  targetServerId  String
+  targetServer    Server  @relation("WatchTarget", fields: [targetServerId], references: [id], onDelete: Cascade)
+  targetLibraryId String
+  targetLibrary   Library @relation("WatchLibrary", fields: [targetLibraryId], references: [id], onDelete: Cascade)
+  targetFolderId  String
+
+  /// "all" to watch every enabled server, or a JSON array of server ids.
+  sourceScope String @default("all")
+
+  enabled Boolean @default(true)
+  /// When false, new findings are logged as suggestions instead of enqueued.
+  autoEnqueue Boolean @default(true)
+
+  lastCheckedAt DateTime?
+  lastFoundAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  jobs SyncJob[]
+
+  @@unique([normSeries, targetLibraryId])
+  @@index([enabled])
+}
+
+/// Human-readable trail of automatic and manual actions.
+model ActivityLog {
+  id  String   @id @default(cuid())
+  at  DateTime @default(now())
+  /// "info" | "warn" | "error"
+  level   String @default("info")
+  /// "index" | "sync" | "watch" | "server" | "system"
+  kind    String
+  message String
+  /// Optional JSON blob with structured context.
+  dataJson String?
+
+  @@index([at])
+  @@index([kind, at])
+}
+
+/// Simple key/value app configuration.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/// A browser's Web Push registration — one row per device that opted in.
+///
+/// The endpoint is the subscription's identity, not a field of it: a push
+/// service mints a fresh endpoint whenever a browser re-subscribes, so the same
+/// phone re-enabling notifications creates a new row rather than updating one.
+/// Rows are removed when a push service answers 404 or 410, which is the only
+/// trustworthy signal that a device will never receive again — a timeout or a
+/// 5xx means the service is unwell, not that the subscription is dead.
+model PushSubscription {
+  id       String @id @default(cuid())
+  endpoint String @unique
+
+  /// ECDH public key and auth secret the browser generated. Payloads are
+  /// encrypted to these, so a push service never sees notification contents.
+  p256dh String
+  auth   String
+
+  /// Set from the User-Agent at subscribe time, so a device is recognisable in
+  /// Settings when you want to revoke one of several.
+  label String?
+
+  createdAt  DateTime  @default(now())
+  lastSentAt DateTime?
+
+  @@index([createdAt])
+}

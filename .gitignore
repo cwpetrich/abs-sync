@@ -1,0 +1,35 @@
+node_modules/
+.next/
+out/
+dist/
+.env
+.env.local
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+generated/
+spool/
+.DS_Store
+*.tsbuildinfo
+.turbo/
+test-*.db
+test-*.db-*
+
+# Agent tooling scaffolding written by `prisma init` (duplicated four ways).
+# The .claude/skills entries are symlinks into .agents/, so committing them
+# would hand anyone who clones a directory of dangling links.
+.agents/
+.windsurf/
+**/.agents/
+**/.windsurf/
+skills-lock.json
+**/skills-lock.json
+**/.claude/skills/
+
+# Per-machine Claude Code permissions, full of absolute paths from one box.
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# pm2 logs
+logs/
