@@ -1,0 +1,65 @@
+# The build context is the whole repo, and most of what is in it either does not
+# belong in an image or would actively break one.
+
+# Host-built node_modules is the dangerous one: better-sqlite3 is a native addon
+# compiled against the host's Node ABI and libc, so letting it shadow the copy
+# built inside the image produces an "invalid ELF header" at first query.
+node_modules/
+**/node_modules/
+
+# Build output. Rebuilt inside the image; copying a stale .next in would also
+# invalidate the layer cache on every local `npm run dev`.
+.next/
+**/.next/
+out/
+dist/
+**/out/
+**/dist/
+**/*.tsbuildinfo
+
+# The Prisma client is generated during the build, against the image's platform.
+apps/web/generated/
+
+# Real data and real credentials. The database and spool live on a volume, and
+# an .env baked into an image is a credential leak wearing a config file.
+#
+# Every pattern here needs its `**/` twin. .dockerignore is NOT .gitignore: it
+# matches with Go's filepath.Match against the whole path from the context root,
+# and `*` does not cross a `/`. So a bare `*.db` matches ./dev.db and silently
+# misses apps/web/dev.db — which is the real one, holding encrypted credentials
+# and the whole index. It went into an image before this comment existed.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+spool/
+**/spool/
+logs/
+**/logs/
+
+# History, editor and agent scaffolding — nothing the build reads.
+.git/
+.gitignore
+.claude/
+**/.claude/
+.agents/
+**/.agents/
+.windsurf/
+**/.windsurf/
+**/skills-lock.json
+.DS_Store
+
+# Docker's own files: changing a compose file should not bust the build cache.
+Dockerfile
+docker-compose.yml
+.dockerignore

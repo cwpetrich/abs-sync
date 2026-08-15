@@ -1,0 +1,56 @@
+# abs-sync, containerised.
+#
+#   cd apps/web && cp .env.example .env    # then fill in ABS_SYNC_SECRET
+#   docker compose up -d --build
+#
+# Configuration comes from apps/web/.env — the same file the from-source setup
+# uses, so there is one place to edit whichever way you run it. The two settings
+# that cannot be shared are overridden below. Everything else is editable live
+# on the Settings page once the app is up; see the README for which settings
+# cannot be, and why.
+
+services:
+  abs-sync:
+    build:
+      context: .
+    image: abs-sync:latest
+    container_name: abs-sync
+    env_file:
+      # Optional so that a missing file produces the entrypoint's explanation of
+      # what to copy where, rather than a bare stat error from Compose.
+      - path: apps/web/.env
+        required: false
+    environment:
+      # These two describe the image's layout, not the operator's preference, and
+      # they have to be here rather than left to the Dockerfile's ENV: env_file
+      # beats image ENV, so the from-source `DATABASE_URL=file:./dev.db` in the
+      # shared file would otherwise win and put the database — and the spool of
+      # part-downloaded books — in the container's writable layer, where
+      # `docker compose down` destroys them. `environment` beats env_file, which
+      # settles it. It also applies to `docker compose exec`, so the operator
+      # scripts read the same database the server does.
+      DATABASE_URL: "file:/data/abs-sync.db"
+      ABS_SYNC_SPOOL_DIR: "/data/spool"
+    ports:
+      # The server always listens on 3000 inside the container; change the left
+      # number if 3000 is taken on the host.
+      - "3000:3000"
+    volumes:
+      # The database and the download spool. The spool holds whole audiobooks
+      # for transfers that have not succeeded yet, so this needs real room —
+      # see ABS_SYNC_SPOOL_KEEP_BYTES for the ceiling.
+      - abs-sync-data:/data
+    # The worker requeues interrupted jobs on the next boot, so restarting is
+    # safe. `unless-stopped` rather than `always`: an explicit `docker compose
+    # stop` should stay stopped across a daemon restart.
+    restart: unless-stopped
+    # Matches the pm2 kill_timeout: let an upload in progress finish instead of
+    # truncating it into a half-written book on the target server.
+    stop_grace_period: 30s
+    # Transfers hold whole audiobooks in flight. This is a ceiling against a
+    # leak, not an operating point — a container that reaches it is OOM-killed
+    # and then restarted by the policy above.
+    mem_limit: 2g
+
+volumes:
+  abs-sync-data:

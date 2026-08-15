@@ -95,11 +95,16 @@ from what is on disk.
 
 ## Requirements
 
-- Node.js 20.9+ (developed on 24)
+- Node.js 20.9+ (developed on 24) — or Docker, which needs neither Node nor a checkout's
+  dependencies on the host. See [Docker](#docker).
 - Audiobookshelf 2.26+ on any server you want to use an **API key** with (API keys landed in 2.26.0).
   Older servers still work via username/password.
 
 ## Setup
+
+To just *run* it, skip to [Docker](#docker) — it is two commands and handles the
+migration step below for you. What follows is the from-source setup, which is
+what you want if you are going to edit the code.
 
 ```bash
 npm install
@@ -129,7 +134,79 @@ be up for days, and a foreground dev server dies with the shell that launched it
 — sshd sends `SIGHUP` to the process group the moment the connection drops, in
 the middle of whatever was transferring.
 
-Run it under a process supervisor instead:
+Run it under a supervisor instead — Docker if you want the whole thing packaged,
+pm2 if you are already running it from a checkout. Both are supported; pick one,
+because two transfer workers against one database is not a configuration this
+app is built for.
+
+#### Docker
+
+```bash
+cd apps/web && cp .env.example .env
+openssl rand -base64 48      # paste into ABS_SYNC_SECRET
+
+cd ../.. && docker compose up -d --build
+docker compose logs -f       # http://localhost:3000
+```
+
+That is the whole install: no Node on the host, no `npm install`, no separate
+migration step. The entrypoint runs `prisma migrate deploy` before starting the
+server, so a first boot creates the schema and `docker compose up -d --build`
+after a `git pull` upgrades it.
+
+There is one `.env`, at `apps/web/.env`, and it is the same file the from-source
+setup uses — so there is a single place to edit whichever way you run it, and
+switching between them carries your configuration across. Compose reads it as the
+container's environment.
+
+Everything that has to outlive the container is on one volume at `/data` — the
+SQLite database at `/data/abs-sync.db` and the download spool at `/data/spool`.
+Those two paths are the only settings Compose overrides rather than taking from
+`.env`, because they are the one thing that cannot be shared: the file's
+`DATABASE_URL=file:./dev.db` is correct from a checkout and would, inside a
+container, put your database and your part-downloaded audiobooks in the writable
+layer, where `docker compose down` destroys them. Mount `/data` somewhere else if
+you want them elsewhere; don't repoint the paths. Size that mount for the spool
+rather than the database — the database is a few hundred KB and the spool holds
+whole books (`ABS_SYNC_SPOOL_KEEP_BYTES`, default 20 GB, is the ceiling).
+
+To keep the data somewhere you can see it, swap the named volume for a bind
+mount and give it to uid 1000, which is the unprivileged `node` user the server
+runs as:
+
+```yaml
+volumes:
+  - /srv/abs-sync:/data      # sudo chown -R 1000:1000 /srv/abs-sync
+```
+
+**Set `ABS_SYNC_ALLOWED_ORIGINS` if you reach the app at anything but
+`http://localhost:3000`**, which in practice means anyone running this on a NAS
+or a home server. The whole UI is Server Actions, and Next rejects an action
+whose `Origin` does not match `Host`; the symptom is a page that renders
+perfectly and whose every button does nothing. Put the host's LAN IP, its
+hostname, or your reverse proxy's hostname in there, comma-separated. It is read
+by `next.config.ts` at boot, so it needs a `docker compose up -d` to take effect
+— unlike the settings on the Settings page, which do not.
+
+The host port is the one thing not in `.env`: Compose only substitutes `${...}`
+from its own top-level env file, so putting it in `apps/web/.env` would leave a
+variable that looks configurable and silently is not. Edit the `ports:` line in
+`docker-compose.yml` if 3000 is taken.
+
+The operator scripts run inside the container, with the working directory set:
+
+```bash
+docker compose exec -w /app/apps/web abs-sync npm run diagnose
+docker compose exec -w /app/apps/web abs-sync npm run notify:keys
+```
+
+The image is around 1.4 GB. Most of that is `next` and the Prisma engines, which
+have to be there: the app is served by `next start` from a full build, and
+`prisma` itself is what applies the migrations at boot.
+
+#### pm2
+
+Running from a checkout instead:
 
 ```bash
 npm run build
@@ -222,6 +299,9 @@ See `apps/web/.env.example` for the environment names.
 packages/core         Server-agnostic matching + diff engine (no dependencies)
 packages/abs-client   Typed Audiobookshelf client, plus a mock server used by tests
 apps/web              Next.js 16 app: UI, Prisma/SQLite, transfer worker, scheduler
+Dockerfile            Multi-stage build; docker/entrypoint.sh migrates then starts
+docker-compose.yml    The supported way to run it — one service, one /data volume
+ecosystem.config.cjs  The pm2 alternative, for running from a checkout
 ```
 
 Workspace packages ship TypeScript source and are compiled by Next via `transpilePackages`, so
