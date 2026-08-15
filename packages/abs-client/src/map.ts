@@ -119,6 +119,7 @@ export function absItemToBookRecord(
     asin: metadata.asin ?? null,
     isbn: metadata.isbn ?? null,
     publishedYear: metadata.publishedYear ?? null,
+    publishedDate: metadata.publishedDate ?? null,
     publisher: metadata.publisher ?? null,
     language: metadata.language ?? null,
     durationSec: duration && duration > 0 ? duration : null,

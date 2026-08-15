@@ -1,4 +1,4 @@
-import { formatBytes } from '@abs-sync/core';
+import { formatBytes, type GroupSort } from '@abs-sync/core';
 import Link from 'next/link';
 import { Suspense } from 'react';
 import { compare, compareSources } from '../../lib/compare';
@@ -18,6 +18,14 @@ function firstString(value: string | string[] | undefined): string | undefined {
 function allStrings(value: string | string[] | undefined): string[] {
   if (value === undefined) return [];
   return Array.isArray(value) ? value : [value];
+}
+
+const SORTS: GroupSort[] = ['name', 'released', 'added'];
+
+/** Anything unrecognised falls back to the default rather than to no groups. */
+function sortParam(value: string | string[] | undefined): GroupSort {
+  const first = firstString(value);
+  return SORTS.find((sort) => sort === first) ?? 'name';
 }
 
 /**
@@ -68,12 +76,14 @@ async function CompareFilters({ searchParams }: { searchParams: Promise<SearchPa
 async function CompareResults({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const params = await searchParams;
   const sourceIds = allStrings(params.source);
+  const sort = sortParam(params.sort);
 
   const result = await compare({
     ...(sourceIds.length > 0 ? { sourceServerIds: sourceIds } : {}),
     ...(firstString(params.q) ? { search: firstString(params.q) } : {}),
     includeUncertain: firstString(params.uncertain) === '1',
     groupBy: (firstString(params.group) as 'series' | 'author' | 'none') ?? 'series',
+    sort,
   });
 
   if (result.problem) {
@@ -142,7 +152,7 @@ async function CompareResults({ searchParams }: { searchParams: Promise<SearchPa
           }
         />
       ) : (
-        <MissingList groups={result.groups} />
+        <MissingList groups={result.groups} sort={sort} />
       )}
 
       {result.diff ? (

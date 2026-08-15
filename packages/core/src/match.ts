@@ -108,12 +108,27 @@ const MAX_ARTIFACT_MULTIPLE = 4;
 /** How close to a whole multiple counts as "exactly N times longer". */
 const MULTIPLE_EPSILON = 0.02;
 
-function durationSimilarity(a: number | null, b: number | null, tolerance: number): number | null {
-  if (!a || !b) return null;
+/** How two runtimes relate, once the doubled-metadata artifact is accounted for. */
+export type DurationRelation =
+  | { kind: 'unknown' }
+  | { kind: 'same' }
+  | { kind: 'artifact'; multiple: number }
+  | { kind: 'differs'; rel: number };
+
+/**
+ * Classifies two runtimes. Shared by scoring and by edition detection so both
+ * agree about what counts as a real difference.
+ */
+export function durationRelation(
+  a: number | null,
+  b: number | null,
+  tolerance: number,
+): DurationRelation {
+  if (!a || !b) return { kind: 'unknown' };
   const longer = Math.max(a, b);
   const shorter = Math.min(a, b);
   const rel = (longer - shorter) / longer;
-  if (rel <= tolerance) return 1;
+  if (rel <= tolerance) return { kind: 'same' };
 
   // Audiobookshelf reports an item's duration as an exact multiple of the truth
   // when `media.audioFiles` has accumulated stale duplicate entries — the same
@@ -125,11 +140,58 @@ function durationSimilarity(a: number | null, b: number | null, tolerance: numbe
   const multiple = longer / shorter;
   const nearest = Math.round(multiple);
   if (nearest >= 2 && nearest <= MAX_ARTIFACT_MULTIPLE && Math.abs(multiple - nearest) <= MULTIPLE_EPSILON) {
-    return null;
+    return { kind: 'artifact', multiple: nearest };
   }
 
-  // Decay to zero by the time the difference reaches tolerance + 50%.
-  return Math.max(0, 1 - (rel - tolerance) / 0.5);
+  return { kind: 'differs', rel };
+}
+
+function durationSimilarity(a: number | null, b: number | null, tolerance: number): number | null {
+  const relation = durationRelation(a, b, tolerance);
+  switch (relation.kind) {
+    case 'unknown':
+    case 'artifact':
+      return null;
+    case 'same':
+      return 1;
+    case 'differs':
+      // Decay to zero by the time the difference reaches tolerance + 50%.
+      return Math.max(0, 1 - (relation.rel - tolerance) / 0.5);
+  }
+}
+
+/**
+ * Below this, two narrator lists are treated as different people rather than
+ * the same name spelled differently. Matches the author-mismatch threshold.
+ */
+const NARRATOR_CONFLICT_MAX = 0.6;
+
+/**
+ * Describes why two copies of one work are not the same recording, or null when
+ * nothing separates them.
+ *
+ * Narrator is checked before runtime because it is the decisive signal when
+ * present: two readings of the same book routinely run within minutes of each
+ * other, so runtime alone would let them pass as interchangeable.
+ */
+export function describeEditionConflict(
+  a: BookIdentity,
+  b: BookIdentity,
+  options: MatchOptions = DEFAULT_MATCH_OPTIONS,
+): string | null {
+  const narratorSim = bestNameSimilarity(a.narrators, b.narrators);
+  if (narratorSim !== null && narratorSim < NARRATOR_CONFLICT_MAX) {
+    const left = a.book.narrators?.join(', ') || 'unknown';
+    const right = b.book.narrators?.join(', ') || 'unknown';
+    return `different narrator (${left} vs ${right})`;
+  }
+
+  const duration = durationRelation(a.durationSec, b.durationSec, options.durationTolerance);
+  if (duration.kind === 'differs') {
+    return `runtime differs by ${Math.round(duration.rel * 100)}%`;
+  }
+
+  return null;
 }
 
 /**
@@ -192,11 +254,14 @@ export function scoreIdentities(
   // shared ASIN across differing volumes indicates bad upstream metadata.
   const conflict = hasVolumeConflict(a, b);
 
+  // A shared hard identifier means the same edition, not merely the same work,
+  // so metadata noise in runtime or narrator is not evidence of a second
+  // recording here.
   if (a.asin && b.asin && a.asin === b.asin && !conflict) {
-    return { score: 1, tier: 'asin', reasons: [`identical ASIN ${a.asin}`] };
+    return { score: 1, tier: 'asin', reasons: [`identical ASIN ${a.asin}`], editionConflict: null };
   }
   if (a.isbn && b.isbn && a.isbn === b.isbn && !conflict) {
-    return { score: 0.995, tier: 'isbn', reasons: [`identical ISBN ${a.isbn}`] };
+    return { score: 0.995, tier: 'isbn', reasons: [`identical ISBN ${a.isbn}`], editionConflict: null };
   }
   if (conflict) return null;
 
@@ -239,7 +304,16 @@ export function scoreIdentities(
   else if (score >= options.fuzzyThreshold) tier = 'fuzzy';
   else return null;
 
-  return { score: Math.max(0, Math.min(1, score)), tier, reasons };
+  // Note this is computed after the tier, not as an input to it. An identical
+  // title and author lands in `exact` before the score is ever consulted, so a
+  // 4-hour abridgement and a 22-hour unabridged reading match just as
+  // confidently as two copies of one recording. That is correct for ownership
+  // and wrong for interchangeability, which is why the difference travels
+  // alongside the tier instead of altering it.
+  const editionConflict = describeEditionConflict(a, b, options);
+  if (editionConflict) reasons.push(editionConflict);
+
+  return { score: Math.max(0, Math.min(1, score)), tier, reasons, editionConflict };
 }
 
 /** Tiers that mean "this is the same book, no human review needed". */

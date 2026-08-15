@@ -275,9 +275,11 @@ a false negative fills your library with duplicates. The engine (`packages/core`
    which matters because a single comparison costs several edit-distance passes.
 3. **Author similarity**, tolerant of `"Last, First"` ordering and of servers disagreeing about how to
    split a name.
-4. **Duration proximity**, which separates abridged from unabridged recordings — except when the
-   two durations differ by an exact whole multiple, which is the signature of a server double-counting
-   its audio files rather than a different recording. There the signal is withheld instead of scored.
+4. **Duration proximity**, which weighs against abridged recordings — except when the two durations
+   differ by an exact whole multiple, which is the signature of a server double-counting its audio
+   files rather than a different recording. There the signal is withheld instead of scored. Note this
+   is only a weight, and an identical title *and* author reaches the top tier before the score is
+   ever consulted; see below for what actually keeps recordings apart.
 
 Two deliberate hard rejections, both there to prevent silent data loss:
 
@@ -289,6 +291,39 @@ Two deliberate hard rejections, both there to prevent silent data loss:
 Anything scoring between "probably" and "definitely" is reported as a **possible duplicate** rather
 than as missing, and is never auto-queued by a watch — unattended automation should not risk
 duplicating someone's library.
+
+### Same work, different recording
+
+Matching answers two questions that want opposite treatment. *"Do I already own this?"* should say
+yes when you own a different narration — you have the book. *"Are these two source copies
+interchangeable?"* must say no, because the narrator is most of what you are choosing.
+
+Scoring one number cannot serve both. Worse, an identical title and author is assigned the `exact`
+tier **before** the score is consulted, so a 4-hour abridgement and a 22-hour unabridged reading match
+exactly as confidently as two copies of one recording, and duration never gets a vote. Narrators were
+not compared at all.
+
+So the difference is *reported* rather than scored. `MatchResult.editionConflict` names what
+separates two copies — a different narrator, or a runtime too far apart to be one reading — while
+tiers and scores stay exactly as they were. Ownership behaves as before; interchangeability now has
+its own answer. (The doubled-metadata artifact above is excluded, or most of an affected library
+would be flagged as ambiguous. A shared ASIN or ISBN means the same edition outright, so runtime noise
+there is ignored.)
+
+Where copies of one work turn out to be different recordings, **nothing picks one for you**:
+
+- The compare row shows an "N editions" pill and describes the difference, and its runtime and
+  narrator describe the copy that would actually be pulled — never the cluster's representative,
+  which would state something untrue of the other copies.
+- The picker has no pre-selected default, and both **Sync all** and **Sync selected** skip the book
+  until an edition is chosen. Per-row choices now survive into those bulk actions; previously the
+  dropdown was visible but every bulk path quietly used the best copy regardless.
+- **Watches refuse to auto-enqueue them**, logging the conflict as a suggestion instead. A watch runs
+  on a schedule, so a wrong guess there repeats — and picking the first downloadable copy is how you
+  end up with an abridgement nobody asked for.
+
+When the copies *are* one recording they remain interchangeable, and the default is kept and labelled
+with the tiebreak that produced it ("best (longest)"), so an automatic choice stays reviewable.
 
 ## Why the compare page streams
 
@@ -318,6 +353,27 @@ for the current route, so a route slower than the poll interval accumulated over
 that also competed with any navigation the user had started — which could restart a slow page load
 indefinitely so it never arrived.
 
+## Sorting the compare page
+
+Groups can be ordered by name, by newest release, or by what a source server most recently gained.
+The last two are not the same question and it is worth being clear which you are asking: a friend who
+just uploaded their twenty-year-old Discworld backlog is *recent* by addition and ancient by release,
+while a series whose latest instalment shipped last month may have sat on their server for years.
+
+Three details:
+
+- **Only the groups are reordered.** The books inside one keep series-sequence order, because a
+  series listed newest-first is unreadable — you want to see where the gap starts.
+- **Release dates degrade instead of lying.** Audiobookshelf reports `publishedDate` (a full date) and
+  `publishedYear` (just the year), and populates neither reliably. The sort prefers the date and
+  stands in January 1st for a bare year, so ordering still works at year granularity; the group header
+  quotes back only the precision actually on offer ("2011" vs "Mar 2026"). `publishedDate` was added
+  to the index later than the rest, so it is null on rows written before that — **a full re-index is
+  what fills it in**, and until then those servers sort by year alone.
+- **Groups with no usable date sort last**, rather than as epoch zero. Treating "unknown" as 1970
+  would park every undated book at the top of a newest-first list, which is the one place it is
+  guaranteed not to belong.
+
 ## Watched series
 
 Marking a series watched means: on every scheduled pass, re-index the watched servers, then queue
@@ -325,6 +381,9 @@ anything in that series your server lacks. Safeguards:
 
 - If your server has **no index**, evaluation is skipped rather than queueing the entire series.
 - Only clear misses are queued; possible duplicates are logged for you to review.
+- Books whose available copies are **different recordings** are logged rather than queued, naming the
+  difference. See [Same work, different recording](#same-work-different-recording) — there is no
+  defensible automatic answer to which narration you wanted.
 - Jobs are deduplicated **by work**, not just by source item — so syncing a book from one friend and
   then having a watch fire before your next re-index won't queue the same book again from someone
   else.

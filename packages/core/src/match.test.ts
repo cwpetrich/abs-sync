@@ -254,3 +254,88 @@ describe('diffAgainstTarget', () => {
     expect(groups.map((g) => g.label).sort()).toEqual(['Standalone', 'The Stormlight Archive']);
   });
 });
+
+describe('edition conflicts', () => {
+  it('still counts a different recording as the same work', () => {
+    // The ownership question and the interchangeability question want opposite
+    // answers here, so the conflict must not weaken the match itself.
+    const match = score(
+      book({ title: 'Dune', authors: ['Frank Herbert'], durationSec: 79200 }),
+      book({ title: 'Dune', authors: ['Frank Herbert'], durationSec: 14400 }),
+    );
+    expect(match && isConfident(match)).toBe(true);
+    expect(match?.editionConflict).toMatch(/runtime differs/);
+  });
+
+  it('separates two narrations that run to the same length', () => {
+    const match = score(
+      book({ title: 'Dune', authors: ['Frank Herbert'], narrators: ['Stephen Fry'], durationSec: 36000 }),
+      book({ title: 'Dune', authors: ['Frank Herbert'], narrators: ['Jim Dale'], durationSec: 36100 }),
+    );
+    expect(match?.editionConflict).toMatch(/different narrator/);
+  });
+
+  it('does not mistake a doubled-metadata runtime for a second edition', () => {
+    // The stale-`media.audioFiles` artifact reports exactly N times the truth.
+    // Treating that as a different recording would flag most of an affected
+    // library — 88% of one real 2.35.1 server — as needing a manual choice.
+    const match = score(
+      book({ title: 'Dune', authors: ['Frank Herbert'], durationSec: 36000 }),
+      book({ title: 'Dune', authors: ['Frank Herbert'], durationSec: 72000 }),
+    );
+    expect(match?.editionConflict).toBeNull();
+  });
+
+  it('trusts a shared ASIN over runtime noise', () => {
+    const match = score(
+      book({ title: 'Dune', asin: 'B0036KWX0Y', durationSec: 79200 }),
+      book({ title: 'Dune', asin: 'B0036KWX0Y', durationSec: 14400 }),
+    );
+    expect(match?.editionConflict).toBeNull();
+  });
+});
+
+describe('diffAgainstTarget copy selection', () => {
+  const mine = [book({ serverId: 'mine', title: 'Dune', authors: ['Frank Herbert'] })];
+
+  it('flags a cluster whose copies are different recordings', () => {
+    const theirs = [
+      book({
+        serverId: 'friendA',
+        title: 'Project Hail Mary',
+        authors: ['Andy Weir'],
+        narrators: ['Ray Porter'],
+        durationSec: 58000,
+      }),
+      book({
+        serverId: 'friendB',
+        title: 'Project Hail Mary',
+        authors: ['Andy Weir'],
+        narrators: ['Scarlett Dubois'],
+        durationSec: 58200,
+      }),
+    ];
+    const result = diffAgainstTarget(theirs, mine);
+    expect(result.missing).toHaveLength(1);
+    expect(result.missing[0]!.copies).toHaveLength(2);
+    expect(result.missing[0]!.editionsDiffer).toMatch(/different narrator/);
+  });
+
+  it('leaves interchangeable copies unflagged and says why one won', () => {
+    const theirs = [
+      book({ serverId: 'friendA', title: 'Neuromancer', authors: ['William Gibson'], durationSec: 36000, sizeBytes: 100 }),
+      book({ serverId: 'friendB', title: 'Neuromancer', authors: ['William Gibson'], durationSec: 36020, sizeBytes: 900 }),
+    ];
+    const result = diffAgainstTarget(theirs, mine);
+    expect(result.missing).toHaveLength(1);
+    expect(result.missing[0]!.editionsDiffer).toBeNull();
+    expect(result.missing[0]!.chosenBy).toBe('largest');
+    expect(result.missing[0]!.representative.serverId).toBe('friendB');
+  });
+
+  it('reports a lone copy as such rather than as a winner', () => {
+    const theirs = [book({ serverId: 'friendA', title: 'Neuromancer', authors: ['William Gibson'] })];
+    const result = diffAgainstTarget(theirs, mine);
+    expect(result.missing[0]!.chosenBy).toBe('only');
+  });
+});

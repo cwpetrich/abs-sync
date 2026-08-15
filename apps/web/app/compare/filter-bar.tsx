@@ -14,6 +14,7 @@ export function FilterBar({ sources }: FilterBarProps) {
 
   const [search, setSearch] = useState(params.get('q') ?? '');
   const groupBy = params.get('group') ?? 'series';
+  const sort = params.get('sort') ?? 'name';
   const includeUncertain = params.get('uncertain') === '1';
   const selectedSources = params.getAll('source');
 
@@ -81,6 +82,25 @@ export function FilterBar({ sources }: FilterBarProps) {
           <option value="none">Nothing</option>
         </select>
       </div>
+
+      {/* Only groups get sorted, so with grouping off there is nothing to order. */}
+      {groupBy === 'none' ? null : (
+        <div>
+          <label className="label" htmlFor="compare-sort">
+            Sort {groupBy === 'author' ? 'authors' : 'series'} by
+          </label>
+          <select
+            id="compare-sort"
+            className="field"
+            value={sort}
+            onChange={(event) => push((next) => next.set('sort', event.target.value))}
+          >
+            <option value="name">Name</option>
+            <option value="released">Newest release</option>
+            <option value="added">Recently added to a server</option>
+          </select>
+        </div>
+      )}
 
       <label className="flex items-center gap-2 pb-2 text-sm">
         <input

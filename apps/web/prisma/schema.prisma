@@ -108,6 +108,10 @@ model IndexedItem {
   asin          String?
   isbn          String?
   publishedYear String?
+  /// Full release date as the source spells it, when it offers one. Null on
+  /// rows written before this column existed, until a full re-index refreshes
+  /// them; ordering by release falls back to publishedYear meanwhile.
+  publishedDate String?
   publisher     String?
   language      String?
 

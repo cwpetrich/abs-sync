@@ -290,6 +290,30 @@ export async function evaluateWatch(
         continue;
       }
 
+      // A watch runs unattended and on a schedule, so it is the one path where
+      // a wrong guess repeats. When the available copies are different
+      // recordings there is no defensible automatic answer — picking the first
+      // downloadable one would pull whichever edition happened to sort first,
+      // which is how you end up with an abridgement you never asked for. Report
+      // it and let a human choose on the compare page instead.
+      if (book.editionsDiffer) {
+        base.suggested++;
+        await logActivity(
+          'watch',
+          `"${book.representative.title}" is available for watched series "${watch.seriesName}" ` +
+            `but the copies are not the same recording (${book.editionsDiffer}) — choose one to sync`,
+          {
+            data: {
+              watchId,
+              itemId: book.representative.itemId,
+              serverId: book.representative.serverId,
+              editionsDiffer: book.editionsDiffer,
+            },
+          },
+        );
+        continue;
+      }
+
       // Prefer a copy we are actually allowed to download.
       const downloadable = book.copies.find(
         (copy) => sources.find((server) => server.id === copy.serverId)?.canDownload,

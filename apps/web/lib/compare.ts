@@ -3,10 +3,16 @@ import {
   diffAgainstTargetAsync,
   groupByAuthor,
   groupBySeries,
+  newestAddition,
+  newestRelease,
+  sortGroups,
   type BookRecord,
+  type CopyChoiceReason,
   type DiffOptions,
   type DiffResult,
+  type GroupSort,
   type MissingBook,
+  type ReleaseDate,
   type SeriesRef,
 } from '@abs-sync/core';
 import { prisma } from './db';
@@ -23,6 +29,8 @@ export interface CompareRequest {
   /** Free-text filter over title, author and series. */
   search?: string;
   groupBy?: 'series' | 'author' | 'none';
+  /** Order of the groups themselves; books inside one keep series order. */
+  sort?: GroupSort;
 }
 
 export interface MissingCopyView {
@@ -34,6 +42,8 @@ export interface MissingCopyView {
   sizeBytes: number | null;
   durationSec: number | null;
   numAudioFiles: number | null;
+  /** Carried per copy because copies of one work may be different readings. */
+  narrators: string[];
   canDownload: boolean;
 }
 
@@ -60,8 +70,16 @@ export interface MissingBookView {
     reasons: string[];
   } | null;
   copies: MissingCopyView[];
-  /** Preferred copy for cover art and for a one-click sync. */
+  /**
+   * Preferred copy for cover art and for a one-click sync — but only a valid
+   * default when `editionsDiffer` is null. Copies of different recordings are
+   * not interchangeable, so the UI must make the user choose instead.
+   */
   bestCopy: MissingCopyView;
+  /** Why `bestCopy` won, so the default stays reviewable rather than arbitrary. */
+  chosenBy: CopyChoiceReason;
+  /** Set when the copies are the same work but not the same recording. */
+  editionsDiffer: string | null;
   /** Existing job for this book, if any. */
   job: { id: string; status: string; phase: string } | null;
 }
@@ -70,6 +88,18 @@ export interface CompareGroupView {
   key: string;
   label: string;
   totalBytes: number;
+  /**
+   * The group's newest release and its most recent arrival on a source server,
+   * or null when nothing in it carries that date. Sent along so the header can
+   * show the figure a chosen sort ordered by, instead of asking the reader to
+   * take the order on trust.
+   *
+   * `label` is pre-rendered because its precision depends on the data: a server
+   * that reported only a year must not be quoted back as a specific day.
+   */
+  newestRelease: { at: number; label: string } | null;
+  /** Epoch millis. */
+  newestAddedAt: number | null;
   items: MissingBookView[];
 }
 
@@ -202,6 +232,27 @@ async function indexFingerprint(serverIds: string[]): Promise<string> {
 /** Drops the comparison cache. Call after anything that rewrites the index. */
 export function invalidateCompareCache(): void {
   diffCache.clear();
+}
+
+/**
+ * Formats a release for a group header, on the server so every reader sees the
+ * same string and hydration has nothing to disagree about. Month precision at
+ * most: the day a book came out is noise next to which year it did, and half
+ * the sources only know the year anyway.
+ */
+const RELEASE_MONTH = new Intl.DateTimeFormat('en', {
+  month: 'short',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
+function releaseView(release: ReleaseDate | null): { at: number; label: string } | null {
+  if (!release) return null;
+  const date = new Date(release.at);
+  return {
+    at: release.at,
+    label: release.exact ? RELEASE_MONTH.format(date) : String(date.getUTCFullYear()),
+  };
 }
 
 function matchesSearch(book: MissingBook, needle: string): boolean {
@@ -372,6 +423,7 @@ export async function compare(request: CompareRequest = {}): Promise<CompareResu
     sizeBytes: record.sizeBytes ?? null,
     durationSec: record.durationSec ?? null,
     numAudioFiles: record.numAudioFiles ?? null,
+    narrators: record.narrators ?? [],
     canDownload: sourceData.downloadable.get(record.serverId) ?? false,
   });
 
@@ -409,6 +461,8 @@ export async function compare(request: CompareRequest = {}): Promise<CompareResu
         : null,
       copies,
       bestCopy: preferred,
+      chosenBy: book.chosenBy,
+      editionsDiffer: book.editionsDiffer,
       job: jobByCopy.get(`${preferred.serverId}:${preferred.itemId}`) ?? null,
     };
   };
@@ -416,20 +470,26 @@ export async function compare(request: CompareRequest = {}): Promise<CompareResu
   let groups: CompareGroupView[];
   const groupBy = request.groupBy ?? 'series';
   if (groupBy === 'none') {
+    // One group, so there is nothing to sort — but the dates still get computed
+    // so the header reads the same as it does in the grouped views.
     groups = [
       {
         key: 'all',
         label: 'All missing books',
         totalBytes: filtered.reduce((sum, book) => sum + (book.representative.sizeBytes ?? 0), 0),
+        newestRelease: releaseView(newestRelease(filtered)),
+        newestAddedAt: newestAddition(filtered),
         items: filtered.map(toView),
       },
     ];
   } else {
     const grouped = groupBy === 'author' ? groupByAuthor(filtered) : groupBySeries(filtered);
-    groups = grouped.map((group) => ({
+    groups = sortGroups(grouped, request.sort ?? 'name').map((group) => ({
       key: group.key,
       label: group.label,
       totalBytes: group.totalBytes,
+      newestRelease: releaseView(newestRelease(group.items)),
+      newestAddedAt: newestAddition(group.items),
       items: group.items.map(toView),
     }));
   }
