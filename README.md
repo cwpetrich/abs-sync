@@ -95,16 +95,16 @@ from what is on disk.
 
 ## Requirements
 
-- Node.js 20.9+ (developed on 24) — or Docker, which needs neither Node nor a checkout's
-  dependencies on the host. See [Docker](#docker).
+- Node.js 20.9+ (developed on 24) — or Docker or snap, neither of which needs Node or a
+  checkout's dependencies on the host. See [Docker](#docker) and [Snap](#snap).
 - Audiobookshelf 2.26+ on any server you want to use an **API key** with (API keys landed in 2.26.0).
   Older servers still work via username/password.
 
 ## Setup
 
-To just *run* it, skip to [Docker](#docker) — it is two commands and handles the
-migration step below for you. What follows is the from-source setup, which is
-what you want if you are going to edit the code.
+To just *run* it, skip to [Docker](#docker) or [Snap](#snap) — either is two
+commands and handles the migration step below for you. What follows is the
+from-source setup, which is what you want if you are going to edit the code.
 
 ```bash
 npm install
@@ -126,6 +126,20 @@ Then, in the UI:
 3. Press **Index now** on each one (comparison reads only from the local index, never live).
 4. **Compare** → review what's missing and press Sync, or **Auto-sync this series**.
 
+### Rotating a credential
+
+When an API key expires or is revoked, or a password changes, use **Change credential** on the
+server's card. It replaces the stored credential and keeps everything else — the index, the job
+history, and any watch aimed at that server. Removing and re-adding the server would work too, and
+costs all three: `Server` cascades on delete.
+
+The new credential is verified before it is written, so a mistyped paste is refused and the old one
+stays in place. That also means rotation needs the server reachable; if it is down, the save fails
+and nothing changes. The current credential is never displayed, not even masked — it is decryptable
+only server-side — so enter the replacement in full. You can switch between an API key and a
+username/password here as well; the cached login token from the old credential is discarded either
+way.
+
 ### Running it for real
 
 `npm run dev` is for editing code. It is the wrong way to *run* this app: the
@@ -135,9 +149,10 @@ be up for days, and a foreground dev server dies with the shell that launched it
 the middle of whatever was transferring.
 
 Run it under a supervisor instead — Docker if you want the whole thing packaged,
-pm2 if you are already running it from a checkout. Both are supported; pick one,
-because two transfer workers against one database is not a configuration this
-app is built for.
+snap if you want that without a Docker daemon and with the service wired into
+systemd for you, pm2 if you are already running it from a checkout. All three are
+supported; pick one, because two transfer workers against one database is not a
+configuration this app is built for.
 
 #### Docker
 
@@ -204,6 +219,154 @@ The image is around 1.4 GB. Most of that is `next` and the Prisma engines, which
 have to be there: the app is served by `next start` from a full build, and
 `prisma` itself is what applies the migrations at boot.
 
+#### Snap
+
+```bash
+sudo snap install snapcraft --classic   # once per machine; it builds inside LXD
+snapcraft                               # a few minutes, mostly npm ci and next build
+sudo snap install --dangerous ./abs-sync_0.1.0_amd64.snap
+```
+
+`--dangerous` is not a warning about this package: it is what installing any
+locally built, unsigned snap requires. If `snapcraft` cannot find LXD, either
+`sudo snap install lxd && sudo lxd init --auto`, or build with
+`snapcraft --destructive-mode` on a machine you do not mind it installing build
+dependencies on — it is Ubuntu 24.04 inside the container either way.
+
+That is the whole install. The service starts immediately and on every boot,
+supervised by systemd through snapd, and the credential-encryption secret is
+generated for you rather than pasted in — the one step Docker and pm2 both make
+you do by hand:
+
+```bash
+sudo snap get abs-sync secret        # back this up; it decrypts your credentials
+sudo snap logs -f abs-sync.server    # http://localhost:13379
+```
+
+Everything that has to outlive an upgrade is under `/var/snap/abs-sync/common`,
+which is shared across revisions rather than replaced with each one: the database
+at `abs-sync.db` and the download spool at `spool/`. Size that filesystem for the
+spool rather than the database — the database is a few hundred KB and the spool
+holds whole books (`ABS_SYNC_SPOOL_KEEP_BYTES`, default 20 GB, is the ceiling).
+`sudo snap remove abs-sync` takes both with it, into an automatic snapshot that
+`snap saved` will list.
+
+Configuration is `snap set`, and only for the settings that genuinely cannot be
+edited live on the Settings page — the same three the environment keeps, plus the
+port and the spool, which are packaging facts here rather than preferences:
+
+| Option | |
+| --- | --- |
+| `sudo snap set abs-sync secret="…"` | Generated at install. Changing it invalidates every stored credential. |
+| `sudo snap set abs-sync port=13379` | What the server binds. Defaults to 13379 rather than the 3000 a checkout and the container use: a snap lands on a machine that is already running things, and 3000 is whatever Node app was started last. One past Audiobookshelf's own 13378, so the two sit together. |
+| `sudo snap set abs-sync allowed-origins=10.0.0.5,nas.local` | Bare hostnames, comma-separated — **set this if you reach the app at anything but `http://localhost:13379`**, for the Server Actions reason described under Docker above. |
+| `sudo snap set abs-sync spool-dir=/media/big/spool` | Moves the spool. Must stay under `/var/snap/abs-sync/common` or be on removable media with `sudo snap connect abs-sync:removable-media`. |
+
+`snap get abs-sync` shows the current values, a bad one is refused rather than
+accepted and ignored, and the service restarts itself when one changes — all
+three are read while the server boots, so a change that did not restart would be
+a change that had not happened.
+
+Everything else — concurrency, watch interval, size limits, Mattermost, browser
+push — is on the Settings page and takes effect without a restart. To pre-seed
+those before the first boot, or to bring a configuration across from another
+install, write them to `/var/snap/abs-sync/common/abs-sync.env` in the format of
+`apps/web/.env.example`; the launcher sources it, and `snap set` wins over it.
+
+The operator scripts are the snap's own command:
+
+```bash
+sudo abs-sync                 # lists them
+sudo abs-sync diagnose
+sudo abs-sync notify-keys
+```
+
+`sudo` because the daemon runs as root, which is snapd's default, so the database
+and the spool are root-owned.
+
+Strict confinement is what makes the spool rule above a rule and not advice: the
+app can write to `/var/snap/abs-sync/common` and to connected removable media,
+and nowhere else. That includes the **spool directory on the Settings page**,
+which is stored in the database and so outranks everything here — point it
+somewhere unconfined and transfers fail on a permission error that looks like a
+disk problem.
+
+Coming from Docker or a checkout, bring the database and its secret together;
+either alone is useless, since one is encrypted with the other:
+
+```bash
+sudo snap stop abs-sync.server
+sudo cp /srv/abs-sync/abs-sync.db /var/snap/abs-sync/common/abs-sync.db
+sudo snap set abs-sync secret="$(grep ^ABS_SYNC_SECRET apps/web/.env | cut -d'"' -f2)"
+sudo cp -r /srv/abs-sync/spool /var/snap/abs-sync/common/   # optional; retained downloads
+sudo snap start abs-sync.server
+```
+
+Upgrading is a rebuild and a reinstall — the launcher runs `prisma migrate deploy`
+at every start, so the database comes along with the code, and `snap revert` puts
+back the previous revision if it does not.
+
+##### Releasing a new version
+
+Two paths, and the local one is the default. `scripts/release-snap.sh` is the
+whole pipeline in one command:
+
+```bash
+npm run snap:install                          # build, install it here, publish nothing
+npm run snap:release                          # build, publish to edge
+scripts/release-snap.sh --bump patch stable   # 0.1.0 -> 0.1.1, published to stable
+```
+
+The version comes from the root `package.json` — `adopt-info` in `snapcraft.yaml`
+reads it at build time — so `--bump` is how a release gets a new number. It leaves
+the change uncommitted and prints the commit and tag to run, because which commit
+a release corresponds to is worth deciding rather than inheriting. The script
+refuses to build from a dirty tree for the same reason, asks before it uploads,
+and checks the store login before the build rather than after it. Once per
+machine: `snapcraft login`. Once ever: `snapcraft register abs-sync`, which
+claims the name so that other people can `snap install abs-sync` without
+building anything.
+
+Each run rebuilds the application part from scratch, so a published snap never
+carries state from the run before it; `--incremental` skips that when you are
+iterating rather than releasing. The Node part stays cached either way, since
+re-downloading and re-verifying the same pinned tarball every release buys
+nothing.
+
+Only amd64 comes out of a local build, since snapcraft does not cross-build.
+`--remote` hands the build to Launchpad's builders instead, which costs nothing.
+It uploads the source publicly, which this repository is anyway; `--project
+<name>` puts the build in a private Launchpad project if that ever stops being
+true.
+
+**The other path is `.github/workflows/snap.yml`**, which builds both
+architectures:
+
+- a pull request builds amd64 and publishes nothing, so packaging that only
+  breaks on a clean tree gets caught before a release rather than during one
+- pushing a `vX.Y.Z` tag builds both and publishes to stable, after checking the
+  tag agrees with `package.json` — a tag that disagrees would publish a snap
+  whose version contradicts the commit that made it
+- the Actions tab runs it by hand against any channel
+
+It wants one secret, scoped to this snap and nothing else in the account:
+
+```bash
+snapcraft export-login --snaps=abs-sync \
+  --acls package_access,package_push,package_update,package_release -
+gh secret set SNAPCRAFT_STORE_CREDENTIALS      # paste that output
+```
+
+Those credentials expire, a year out by default, and when they do the publish
+step fails while the build above it still passes.
+
+All of that is free because this repository is public: standard GitHub-hosted
+runners are unmetered for public repositories, and `ubuntu-24.04-arm` — the
+reason arm64 needs no Launchpad round trip — is one of them. Going private again
+would meter the minutes, and a build spends most of them on `npm ci`, a Next
+build and a second `npm ci --omit=dev`, so the local script would go back to
+being the cheaper path.
+
 #### pm2
 
 Running from a checkout instead:
@@ -259,6 +422,10 @@ an empty field as "erase".
 | `DATABASE_URL` | It is how the settings are found in the first place. |
 | `ABS_SYNC_ALLOWED_ORIGINS` | `next.config.ts` reads it while the server boots, well before a database connection exists. Offering it as a live setting would mean a field that silently does nothing until restart. |
 
+Under snap those three are `snap set` options rather than environment variables —
+`secret`, `allowed-origins`, and a `port` that Compose keeps in `docker-compose.yml`
+instead. See [Snap](#snap).
+
 `getEnv()` stays synchronous — it is called from 28 places including once per worker tick, and making
 it async to await a query would put a database round trip on a hot path. So overrides load into
 memory once at boot and refresh whenever they are written. That is safe for a single process; a
@@ -302,6 +469,11 @@ apps/web              Next.js 16 app: UI, Prisma/SQLite, transfer worker, schedu
 Dockerfile            Multi-stage build; docker/entrypoint.sh migrates then starts
 docker-compose.yml    The supported way to run it — one service, one /data volume
 ecosystem.config.cjs  The pm2 alternative, for running from a checkout
+snap/snapcraft.yaml   Snap package: one service, one writable directory, `snap set` config
+snap/local/           The service and operator-CLI launchers that run inside the snap
+snap/hooks/configure  Validates `snap set`, and generates the secret on install
+scripts/              release-snap.sh: build, install and publish the snap
+.github/workflows/    snap.yml: the same, on a tag, for amd64 and arm64
 ```
 
 Workspace packages ship TypeScript source and are compiled by Next via `transpilePackages`, so

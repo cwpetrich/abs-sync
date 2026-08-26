@@ -1,0 +1,89 @@
+name: snap
+
+# The other half of the release path. `scripts/release-snap.sh` is the local one
+# and stays the default; this covers the two things a laptop cannot do:
+#
+#   arm64      snapcraft does not cross-build, so the only ways to get one are
+#              an arm64 machine or somebody else's builders
+#   a clean    the packaging has broken before in a way that only showed up on a
+#   tree       second build, from state left in parts/. A run here always starts
+#              from nothing, so a pull request that breaks packaging says so.
+#
+# This is free only while the repository is public: standard GitHub-hosted
+# runners are unmetered for public repositories, and `ubuntu-24.04-arm` is what
+# makes the arm64 build free rather than a Launchpad round trip. If the
+# repository goes private again the minutes are metered, a build here spends
+# most of them on npm ci and next build, and the local script is the cheap path.
+#
+# Deliberately no artifact upload. The snap is ~200 MB, storage is metered
+# separately from minutes, and the store is where it is going anyway.
+
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Channel to release to
+        type: choice
+        default: edge
+        options: [edge, beta, candidate, stable]
+
+# A superseded pull-request build is of no interest. A tag build is: cancelling
+# one half-way leaves one architecture published and the other not.
+concurrency:
+  group: snap-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  snap:
+    strategy:
+      fail-fast: false
+      matrix:
+        # A pull request only needs to know the packaging still builds, and
+        # amd64 answers that. Tags and manual runs produce both, because both
+        # get published.
+        # fromJSON wraps the choice rather than each branch: the ternary is
+        # then picking between two strings, whose truthiness is defined, instead
+        # of between two arrays, whose truthiness is not.
+        arch: ${{ fromJSON(github.event_name == 'pull_request' && '["amd64"]' || '["amd64", "arm64"]') }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    name: ${{ matrix.arch }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The snap takes its version from the root package.json — adopt-info in
+      # snapcraft.yaml reads it at build time — so a v1.2.3 tag on a tree that
+      # still says 1.2.2 publishes a snap whose version disagrees with the tag
+      # that produced it. Cheaper to fail here than to work that out later from
+      # `snapcraft status`.
+      - name: Check the tag against package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p 'require("./package.json").version')"
+          if [ "${tag}" != "${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} but package.json says ${version}"
+            exit 1
+          fi
+
+      - uses: canonical/action-build@v1
+        id: build
+
+      # Tags publish to stable; a manual run publishes wherever it was asked to.
+      # Pull requests publish nowhere, which is also why they need no secret —
+      # one from a fork could not read it anyway.
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        uses: canonical/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: ${{ inputs.channel || 'stable' }}

@@ -1,0 +1,88 @@
+# Shared environment for the abs-sync snap. Sourced by bin/abs-sync-server and
+# bin/abs-sync-cli, never run on its own — the service and the operator scripts
+# have to agree about which database they are talking to, and duplicating that
+# in two files is how they stop agreeing.
+#
+# Resolution order, lowest to highest:
+#
+#   1. the fixed values below, which describe the snap's layout
+#   2. /var/snap/abs-sync/common/abs-sync.env, if the operator wrote one — the
+#      analogue of apps/web/.env, and the way to pre-seed settings that have no
+#      snap option because they are editable live on the Settings page
+#   3. $SNAP_DATA/config.env, written by the configure hook from `snap set`
+#   4. DATABASE_URL, re-pinned, because it is the one value that cannot be
+#      wrong: the database has to be on writable storage that upgrades keep
+#
+# Same shape as docker-compose.yml, where `environment` beats `env_file` for the
+# two paths that mean different things inside the container than out.
+
+# $SNAP/bin is already on PATH via snapd, but the Prisma and Next CLIs are
+# `#!/usr/bin/env node` scripts and a missing node here reads as a missing CLI.
+PATH="${SNAP}/bin:${PATH}"
+export PATH
+
+export NODE_ENV=production
+export NEXT_TELEMETRY_DISABLED=1
+
+# Anything that reaches for a cache or a config directory — npm, Prisma, tsx —
+# would otherwise land on /root, which the confinement profile denies and which
+# is not ours to litter in any case.
+export HOME="${SNAP_COMMON}"
+export XDG_CACHE_HOME="${SNAP_COMMON}/cache"
+
+export ABS_SYNC_SPOOL_DIR="${SNAP_COMMON}/spool"
+# 13379, not the 3000 the checkout and the container use: a snap installs onto a
+# machine that is already running things, and 3000 is whatever Node app someone
+# started last. One past Audiobookshelf's own 13378, so the two sit together.
+export PORT=13379
+export HOSTNAME=0.0.0.0
+
+if [ -f "${SNAP_COMMON}/abs-sync.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${SNAP_COMMON}/abs-sync.env"
+  set +a
+fi
+
+if [ -f "${SNAP_DATA}/config.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${SNAP_DATA}/config.env"
+  set +a
+fi
+
+# Not negotiable: a relative `file:./dev.db` is correct from a checkout and
+# would here put the database somewhere read-only or somewhere an upgrade
+# discards. Told, rather than silently overridden, because a DATABASE_URL in
+# abs-sync.env is a reasonable thing to have copied in from a Docker install and
+# a puzzling thing to have ignored.
+if [ -n "${DATABASE_URL:-}" ] && [ "${DATABASE_URL}" != "file:${SNAP_COMMON}/abs-sync.db" ]; then
+  echo "[abs-sync] ignoring DATABASE_URL=\"${DATABASE_URL}\"; the database lives at ${SNAP_COMMON}/abs-sync.db" >&2
+fi
+export DATABASE_URL="file:${SNAP_COMMON}/abs-sync.db"
+
+# Created on every start rather than at install: the spool is configurable, and
+# a `snap set abs-sync spool-dir=/media/big/spool` has to work without the
+# operator being told to go and mkdir it.
+mkdir -p "${ABS_SYNC_SPOOL_DIR}" "${SNAP_COMMON}/next-cache" "${XDG_CACHE_HOME}"
+
+# Without the secret the server still boots — instrumentation.ts deliberately
+# swallows the error so the Settings page stays reachable — but every credential
+# read and write fails, which reads as a broken app rather than a missing value.
+# The configure hook generates one on install, so reaching this means somebody
+# ran `snap unset abs-sync secret` without an abs-sync.env to fall back on.
+if [ -z "${ABS_SYNC_SECRET:-}" ]; then
+  cat >&2 <<'MESSAGE'
+abs-sync: ABS_SYNC_SECRET is not set.
+
+It encrypts the Audiobookshelf credentials stored in the database, so nothing
+useful happens without it. One is normally generated at install time:
+
+    sudo snap set abs-sync secret="$(openssl rand -base64 48)"
+
+Keep it. Changing it invalidates every stored credential.
+MESSAGE
+  exit 1
+fi
+
+cd "${SNAP}/app/apps/web"
