@@ -53,6 +53,7 @@ website: https://github.com/cwpetrich/abs-sync
 source-code: https://github.com/cwpetrich/abs-sync
 contact: https://github.com/cwpetrich/abs-sync/issues
 issues: https://github.com/cwpetrich/abs-sync/issues
+license: MIT
 grade: stable
 confinement: strict
 
