@@ -322,10 +322,26 @@ reads it at build time — so `--bump` is how a release gets a new number. It le
 the change uncommitted and prints the commit and tag to run, because which commit
 a release corresponds to is worth deciding rather than inheriting. The script
 refuses to build from a dirty tree for the same reason, asks before it uploads,
-and checks the store login before the build rather than after it. Once per
-machine: `snapcraft login`. Once ever: `snapcraft register abs-sync`, which
-claims the name so that other people can `snap install abs-sync` without
-building anything.
+and checks the store login before the build rather than after it.
+
+Once ever, the name has to be claimed, which is what lets anyone else
+`snap install abs-sync` without building it: either
+<https://snapcraft.io/account/register-snap> in a browser, or
+`snapcraft register abs-sync`. Once per machine, a login — and `snapcraft login`
+is the wrong command on anything without a desktop keyring, where it does not
+log you in but fails with *no keyring found to store or retrieve credentials
+from*. A tty session, a server, and most build boxes are all in that category.
+Export a credential and put it in the environment instead:
+
+```bash
+snapcraft export-login --snaps=abs-sync \
+  --acls package_access,package_push,package_update,package_release \
+  ~/.config/abs-sync-store-credentials
+export SNAPCRAFT_STORE_CREDENTIALS="$(cat ~/.config/abs-sync-store-credentials)"
+```
+
+Put that export in a shell profile and every command below stops asking. It is
+a bearer credential for this one snap: treat the file as you would an SSH key.
 
 Each run rebuilds the application part from scratch, so a published snap never
 carries state from the run before it; `--incremental` skips that when you are
@@ -349,12 +365,12 @@ architectures:
   whose version contradicts the commit that made it
 - the Actions tab runs it by hand against any channel
 
-It wants one secret, scoped to this snap and nothing else in the account:
+It wants one secret, and it is the same credential the local path uses, so the
+file from above is all it needs — piped rather than pasted, to keep it out of
+the terminal scrollback:
 
 ```bash
-snapcraft export-login --snaps=abs-sync \
-  --acls package_access,package_push,package_update,package_release -
-gh secret set SNAPCRAFT_STORE_CREDENTIALS      # paste that output
+gh secret set SNAPCRAFT_STORE_CREDENTIALS < ~/.config/abs-sync-store-credentials
 ```
 
 Those credentials expire, a year out by default, and when they do the publish

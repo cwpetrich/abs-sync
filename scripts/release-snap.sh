@@ -101,8 +101,28 @@ command -v snapcraft >/dev/null 2>&1 \
 # Before the build rather than before the upload. Store credentials expire, and
 # discovering that after a ten-minute build is a bad way to find out.
 if [ "${upload}" = yes ]; then
-  snapcraft whoami >/dev/null 2>&1 \
-    || die "not logged in to the store — run: snapcraft login (or --build-only)"
+  if ! snapcraft whoami >/dev/null 2>&1; then
+    cat >&2 <<'MESSAGE'
+release-snap: not logged in to the store.
+
+  snapcraft login
+
+On a machine with no desktop keyring — a tty session, a server, anything not
+running gnome-keyring or kwallet — that does not log you in, it fails with "no
+keyring found to store or retrieve credentials from". Export a credential
+instead. It only has to be done once, and the same value is what CI uses:
+
+  snapcraft export-login --snaps=abs-sync \
+    --acls package_access,package_push,package_update,package_release \
+    ~/.config/abs-sync-store-credentials
+  export SNAPCRAFT_STORE_CREDENTIALS="$(cat ~/.config/abs-sync-store-credentials)"
+
+Put that export in your shell profile and this check passes from then on.
+
+To build without publishing at all, pass --build-only.
+MESSAGE
+    exit 1
+  fi
 fi
 
 # Checked before the bump, so the bump is the only thing that dirties the tree.
