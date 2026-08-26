@@ -1,0 +1,266 @@
+# abs-sync as a snap.
+#
+# The third way to run this, alongside `docker compose` and pm2, and the one
+# that needs least of the host: no Node, no checkout, no `npm install`, and no
+# separate step to remember on upgrade. `snapd` supervises the service the way
+# pm2 and Docker's restart policy do, which matters because this app is not just
+# a web UI — instrumentation.ts starts a transfer worker and a watch scheduler
+# on boot and they are meant to stay up for days.
+#
+# Two things must survive an upgrade, and both live in $SNAP_COMMON
+# (/var/snap/abs-sync/common), which is shared across revisions rather than
+# per-revision like $SNAP_DATA:
+#
+#   /var/snap/abs-sync/common/abs-sync.db    the database
+#   /var/snap/abs-sync/common/spool          part-downloaded audiobooks
+#
+# Configuration is `snap set`. Only the settings that genuinely cannot be edited
+# live on the Settings page are exposed as snap options — see the configure hook
+# for which, and why.
+name: abs-sync
+title: abs-sync
+base: core24
+adopt-info: abs-sync
+summary: Compare Audiobookshelf libraries across servers and sync books between them
+description: |
+  abs-sync compares your Audiobookshelf library against servers other people
+  have given you access to, shows what they have that you do not, and pulls
+  those books onto your server — by book, by author, or by a whole series that
+  keeps itself in sync.
+
+  Audiobookshelf has no server-to-server transfer API, so a sync here means
+  downloading each original audio file from the source server and uploading them
+  as one new item to yours. Transfers therefore need disk room and time; the
+  spool lives at /var/snap/abs-sync/common/spool.
+
+  After installing, browse to http://localhost:13379 and add your servers. The
+  credential-encryption secret is generated for you on install.
+
+  Configuration:
+
+    snap set abs-sync port=13379
+    snap set abs-sync allowed-origins=10.0.0.5,nas.local
+    snap get abs-sync secret
+
+  Set allowed-origins if you reach the app at anything but http://localhost:13379
+  — the UI is entirely Server Actions, and Next.js rejects an action whose
+  Origin does not match Host. The symptom is a page that renders perfectly and
+  whose every button does nothing.
+
+  There is no login. Run it on a trusted network or behind an authenticating
+  reverse proxy.
+website: https://github.com/cwpetrich/abs-sync
+source-code: https://github.com/cwpetrich/abs-sync
+contact: https://github.com/cwpetrich/abs-sync/issues
+issues: https://github.com/cwpetrich/abs-sync/issues
+license: MIT
+grade: stable
+confinement: strict
+
+# Built natively, not cross-built: better-sqlite3 is compiled during the build,
+# so an arm64 snap has to be built on arm64 hardware.
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  # The service. Named `server` rather than `abs-sync` so that the snap's own
+  # name stays free for the operator CLI below — `abs-sync diagnose` reads
+  # better than `abs-sync.cli diagnose`, and nobody runs a daemon by hand.
+  #
+  #   sudo snap logs -f abs-sync.server
+  #   sudo snap restart abs-sync.server
+  server:
+    command: bin/abs-sync-server
+    daemon: simple
+    install-mode: enable
+    # A transfer that dies takes its spool with it, and the worker requeues
+    # interrupted jobs on the next boot — so restarting is safe and wanted.
+    restart-condition: always
+    # Back off rather than hammering a server that fails on startup, the same
+    # reason ecosystem.config.cjs sets restart_delay.
+    restart-delay: 5s
+    # Matches pm2's kill_timeout and Compose's stop_grace_period: let an upload
+    # in progress finish instead of truncating it into a half-written book on
+    # the target server.
+    stop-timeout: 30s
+    plugs:
+      - network          # talking to Audiobookshelf servers, Mattermost, push
+      - network-bind     # serving the UI
+      - removable-media  # only needed if the spool is moved to /media
+
+  # The operator scripts — `sudo abs-sync diagnose`, `sudo abs-sync notify-keys`
+  # — which are the snap's equivalent of `docker compose exec … npm run …`.
+  # sudo because the database and spool are root-owned, this being a root daemon.
+  abs-sync:
+    command: bin/abs-sync-cli
+    plugs:
+      - network
+      - removable-media
+
+parts:
+  # ------------------------------------------------------------------- node
+  # Node is not in the archive at a version this app can use — core24 ships 18,
+  # and package.json asks for 20.11+ — so it comes from nodejs.org, pinned and
+  # checksummed here rather than trusted to whatever the build host has.
+  #
+  # This is what snapcraft's own npm plugin does internally, minus its build
+  # step: that one ends in `npm install -g` of a single package, which is not
+  # what a workspace monorepo with a Next build wants, and it forces
+  # NODE_ENV=production, which would quietly drop the dev dependencies
+  # `next build` needs. Doing the download by hand costs fifteen lines and keeps
+  # the build below ordinary.
+  #
+  # Bumping the version means changing all three values. Checksums are the ones
+  # published at https://nodejs.org/dist/v<version>/SHASUMS256.txt.
+  node:
+    plugin: nil
+    build-packages:
+      - curl
+      - ca-certificates
+    override-build: |
+      set -eu
+      version="24.14.0"
+      # CRAFT_ARCH_BUILD_FOR is core24's; the fallback is for a `snapcraft
+      # --destructive-mode` build on an older snapcraft that does not set it.
+      target_arch="${CRAFT_ARCH_BUILD_FOR:-$(dpkg --print-architecture)}"
+      case "${target_arch}" in
+        amd64)
+          arch="x64"
+          sha256="dbf5b8665dec15e59e6359a517fefb47b23fdb9152d8def975b9bca3dfc6d355"
+          ;;
+        arm64)
+          arch="arm64"
+          sha256="f44740cd218de8127f1c44c41510a3a740fa5c9c8d1cdce1c3bedada79f3cde7"
+          ;;
+        *)
+          echo "abs-sync: no pinned Node for ${target_arch}" >&2
+          exit 1
+          ;;
+      esac
+
+      mkdir -p "${CRAFT_PART_SRC}"
+      tarball="${CRAFT_PART_SRC}/node-v${version}-linux-${arch}.tar.gz"
+      # Kept in the part's source dir so that re-running the build after editing
+      # this file does not re-fetch 50 MB.
+      if [ ! -f "${tarball}" ]; then
+        curl --retry 5 --fail --location --silent --show-error \
+          "https://nodejs.org/dist/v${version}/node-v${version}-linux-${arch}.tar.gz" \
+          -o "${tarball}"
+      fi
+      echo "${sha256}  ${tarball}" | sha256sum --check --strict -
+
+      # --strip-components drops the node-v…-linux-… wrapper directory, so this
+      # lands as bin/, lib/, share/ — which is $SNAP/bin/node once primed, and
+      # $CRAFT_STAGE/bin/node for the part below to build with.
+      tar -xzf "${tarball}" -C "${CRAFT_PART_INSTALL}" --no-same-owner --strip-components=1
+
+      # Headers and manuals: needed by nothing here. node-gyp fetches its own
+      # headers when it builds better-sqlite3.
+      rm -rf "${CRAFT_PART_INSTALL}/include" \
+             "${CRAFT_PART_INSTALL}/share/doc" \
+             "${CRAFT_PART_INSTALL}/share/man" \
+             "${CRAFT_PART_INSTALL}/share/systemtap"
+
+  # --------------------------------------------------------------- abs-sync
+  # The same sequence as the Dockerfile's deps → build → pruned stages, in one
+  # part: install everything, build, then reinstall without the dev tree. The
+  # stages exist there to keep layers cacheable; there are no layers here.
+  abs-sync:
+    plugin: nil
+    source: .
+    after:
+      - node
+    build-packages:
+      # better-sqlite3 is a native addon. npm downloads a prebuilt binary for
+      # the running Node ABI when one exists and falls back to a source build
+      # when it does not — which without a toolchain fails deep inside an npm
+      # log rather than here. Same reasoning as the Dockerfile's deps stage.
+      - python3
+      - make
+      - g++
+    build-environment:
+      - PATH: "${CRAFT_STAGE}/bin:${PATH}"
+      - NPM_CONFIG_FUND: "false"
+      - NPM_CONFIG_AUDIT: "false"
+      - NPM_CONFIG_UPDATE_NOTIFIER: "false"
+      - NEXT_TELEMETRY_DISABLED: "1"
+    override-build: |
+      set -eu
+
+      # `source: .` copies the working tree verbatim, so everything
+      # .dockerignore exists to keep out of an image has to be removed here
+      # instead. The dangerous one is a host-built node_modules: better-sqlite3
+      # compiled against the host's Node ABI and libc would shadow the copy
+      # built here and produce an "invalid ELF header" at the first query. The
+      # .env and the databases are the other kind of dangerous — real
+      # credentials, in a package meant to be handed around.
+      rm -rf node_modules apps/*/node_modules packages/*/node_modules
+      rm -rf apps/web/.next apps/web/generated apps/web/spool .next logs
+      rm -f apps/web/.env apps/web/.env.local
+      find . -name '*.db' -o -name '*.db-journal' -o -name '*.db-wal' \
+        -o -name '*.db-shm' -o -name '*.tsbuildinfo' | xargs -r rm -f
+
+      # Dev dependencies included — `next build` needs TypeScript, Tailwind and
+      # the Next compiler.
+      npm ci
+
+      # The generated Prisma client is written to apps/web/generated, which is
+      # gitignored, so it has to be produced here rather than copied in.
+      (cd apps/web && npx prisma generate)
+
+      # `next build` imports lib/db.ts, which constructs the Prisma client at
+      # module scope and so calls getEnv() — which throws unless these two are
+      # present. The build never opens the database or decrypts anything; it
+      # just needs the values to exist, and neither reaches the snap.
+      ABS_SYNC_SECRET="placeholder-used-only-while-building-never-at-runtime" \
+      DATABASE_URL="file:/tmp/abs-sync-build-placeholder.db" \
+        npm run build
+
+      # Down to the runtime tree. `prisma`, `next` and `tsx` are all runtime
+      # dependencies rather than dev ones, deliberately: migrations are applied
+      # at every start, the server is `next start`, and the operator scripts are
+      # TypeScript run through tsx.
+      npm ci --omit=dev
+
+      # $SNAP is a read-only squashfs, and `next start` writes to .next/cache —
+      # revalidatePath() maintains its tag manifest there, so this is not
+      # hypothetical. A symlink out to the writable area is the only way to give
+      # it somewhere to write; the alternative is copying the whole build into
+      # $SNAP_COMMON at first boot. Absolute, because it is resolved inside the
+      # snap's mount namespace where $SNAP_COMMON really is at this path. (A
+      # parallel install under an instance name gets /var/snap/abs-sync_name/
+      # and would not match — the one setup this does not support.)
+      rm -rf apps/web/.next/cache
+
+      # $SNAP/app is the repository root, so the relative symlinks npm made in
+      # node_modules/@abs-sync/* into packages/ keep resolving, and so the
+      # operator scripts run against the same layout as a checkout.
+      install -d "${CRAFT_PART_INSTALL}/app/apps"
+      cp -a package.json package-lock.json node_modules packages "${CRAFT_PART_INSTALL}/app/"
+      cp -a apps/web "${CRAFT_PART_INSTALL}/app/apps/"
+
+      # The symlink goes in the install directory rather than the build tree.
+      # Left in the build tree it survives to the next run, and craft-parts then
+      # tries to copy a developer's real apps/web/.next/cache directory onto it
+      # and dies with FileExistsError — a second build fails where the first
+      # succeeded, which is exactly what a release script does.
+      ln -s /var/snap/abs-sync/common/next-cache \
+            "${CRAFT_PART_INSTALL}/app/apps/web/.next/cache"
+
+      craftctl set version="$(node -p 'require("./package.json").version')"
+
+  # ------------------------------------------------------------- launchers
+  # Kept out of the part above so that editing a launcher does not rebuild the
+  # application — which is an `npm ci` and a `next build` away.
+  launchers:
+    plugin: dump
+    source: snap/local
+    organize:
+      abs-sync-server: bin/abs-sync-server
+      abs-sync-cli: bin/abs-sync-cli
+      abs-sync-common: bin/abs-sync-common
+    override-build: |
+      craftctl default
+      # organize runs after build, so these are still at the top level here.
+      chmod 0755 "${CRAFT_PART_INSTALL}/abs-sync-server" "${CRAFT_PART_INSTALL}/abs-sync-cli"

@@ -1,0 +1,5 @@
+# Paired with require_code_owner_review in the `main` ruleset: nothing merges
+# without review from the owner. It changes nothing while the collaborator list
+# is one person — it is here so that granting someone write access later does
+# not quietly also grant them the ability to merge their own work.
+*  @cwpetrich

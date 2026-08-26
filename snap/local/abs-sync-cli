@@ -1,0 +1,63 @@
+#!/bin/sh
+# The operator scripts, run against the service's own database and spool — the
+# snap's equivalent of `docker compose exec -w /app/apps/web abs-sync npm run …`.
+#
+# Needs sudo: the daemon runs as root, so everything under
+# /var/snap/abs-sync/common is root-owned.
+set -eu
+
+usage() {
+  cat <<'MESSAGE'
+Usage: sudo abs-sync <command> [arguments]
+
+  diagnose            Check every configured server: reachability, credentials, libraries
+  index [server]      Re-index servers now instead of waiting for the scheduler
+  find <query>        Look up an item across the local index
+  preflight <item>    Dry-run a transfer: sizes, file list, what would be uploaded
+  requeue             Requeue interrupted or failed jobs
+  scan-files          Check spooled files against what the source server reports
+  probe-file <args>   Download one file and report what actually came back
+  spool-fix           Repair spool paths after the spool directory moved
+  pause-watches       Stop every watch from firing, without deleting them
+  notify-keys         Generate a VAPID keypair for browser push (paste it into
+                      Settings -> Notifications; there is no .env to put it in here)
+
+Configuration is `snap set abs-sync <option>=<value>`; run `snap get abs-sync`
+to see the current values. Settings not listed there are edited live on the
+Settings page in the UI.
+MESSAGE
+}
+
+command="${1:-}"
+[ $# -gt 0 ] && shift
+
+# The names are the CLI's, not the filenames' — `scan-files` rather than
+# `scan-file-integrity.mts`. They match the npm scripts in apps/web/package.json
+# where those read well and diverge where they do not.
+case "${command}" in
+  diagnose)       script=diagnose.mts ;;
+  index)          script=index-servers.mts ;;
+  find)           script=find-item.mts ;;
+  preflight)      script=preflight-item.mts ;;
+  requeue)        script=requeue-jobs.mts ;;
+  scan-files)     script=scan-file-integrity.mts ;;
+  probe-file)     script=probe-file-download.mts ;;
+  spool-fix)      script=fix-spool-paths.mts ;;
+  pause-watches)  script=pause-watches.mts ;;
+  notify-keys)    script=generate-vapid-keys.mts ;;
+  help|--help|-h|'')
+    usage
+    exit 0
+    ;;
+  *)
+    echo "abs-sync: unknown command \"${command}\"" >&2
+    echo >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+# shellcheck disable=SC1091
+. "${SNAP}/bin/abs-sync-common"
+
+exec "${SNAP}/app/node_modules/.bin/tsx" "${SNAP}/app/apps/web/scripts/${script}" "$@"

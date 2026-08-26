@@ -8,6 +8,9 @@
     "dev": "npm run dev -w @abs-sync/web",
     "build": "npm run build -w @abs-sync/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "snap:build": "scripts/release-snap.sh --build-only",
+    "snap:install": "scripts/release-snap.sh --build-only --install",
+    "snap:release": "scripts/release-snap.sh"
   }
 }

@@ -59,6 +59,14 @@ logs/
 **/skills-lock.json
 .DS_Store
 
+# The snap packaging: its own build, and nothing the image reads.
+snap/
+
+# Release tooling. Same reasoning, and keeping it out means editing the release
+# script does not invalidate the image's build cache.
+scripts/
+.github/
+
 # Docker's own files: changing a compose file should not bust the build cache.
 Dockerfile
 docker-compose.yml

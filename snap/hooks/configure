@@ -1,0 +1,137 @@
+#!/bin/sh
+# Runs on install and on every `snap set abs-sync …`.
+#
+# Three jobs: generate the credential-encryption secret the first time, refuse
+# values that would fail confusingly later, and write the options out as an env
+# file for the launchers to source. Exiting non-zero makes `snap set` fail and
+# roll the change back, which is why validation belongs here rather than in the
+# service, where a bad value costs a restart to discover.
+#
+# Only settings that genuinely cannot be edited live on the Settings page are
+# offered as snap options. Everything else — concurrency, watch interval,
+# Mattermost, VAPID, size limits — resolves database-override → environment →
+# default and is editable in the UI while a transfer runs, so an option here
+# would be a second way to set the same thing that the UI then silently wins
+# over. The exceptions:
+#
+#   secret           encrypts credentials *in this database*, so storing it in
+#                    the database beside its own ciphertext is ornamental
+#   allowed-origins  read by next.config.ts while the server boots, long before
+#                    a database connection exists
+#   port             the same, and it is what the server binds
+#   spool-dir        needs to be somewhere confinement lets us write, which is
+#                    a packaging fact rather than a preference
+set -eu
+
+fail() {
+  echo "abs-sync: $*" >&2
+  exit 1
+}
+
+# ------------------------------------------------------------------- secret
+secret="$(snapctl get secret || true)"
+
+if [ -z "${secret}" ]; then
+  # An operator env file that already carries a secret is a migration from the
+  # Docker or from-source setup, where the existing credentials are encrypted
+  # with it. Generating a new one here would leave every stored credential
+  # undecryptable, so leave the field unset and let abs-sync-common read the
+  # file instead.
+  file_secret=""
+  if [ -f "${SNAP_COMMON}/abs-sync.env" ]; then
+    # shellcheck disable=SC1091
+    file_secret="$( . "${SNAP_COMMON}/abs-sync.env" >/dev/null 2>&1; printf '%s' "${ABS_SYNC_SECRET:-}" )"
+  fi
+
+  if [ -z "${file_secret}" ]; then
+    secret="$("${SNAP}/bin/node" -e 'process.stdout.write(require("node:crypto").randomBytes(48).toString("base64"))')"
+    snapctl set secret="${secret}"
+  fi
+elif [ "${#secret}" -lt 32 ]; then
+  # Matches the check in lib/env.ts. Caught here, `snap set` refuses it; caught
+  # there, the app boots and then fails on every credential it touches.
+  fail "secret must be at least 32 characters. Generate one with: openssl rand -base64 48"
+fi
+
+# --------------------------------------------------------------------- port
+port="$(snapctl get port || true)"
+if [ -z "${port}" ]; then
+  # One past Audiobookshelf's 13378, rather than the 3000 a checkout uses —
+  # see bin/abs-sync-common. Written back so `snap get` shows it.
+  port=13379
+  snapctl set port="${port}"
+fi
+case "${port}" in
+  ''|*[!0-9]*) fail "port must be a number, not \"${port}\"" ;;
+esac
+[ "${port}" -ge 1 ] && [ "${port}" -le 65535 ] || fail "port must be between 1 and 65535"
+
+# ---------------------------------------------------------- allowed-origins
+# Hostnames the app is reached by besides localhost. Next compares a Server
+# Action's Origin against Host to prevent CSRF, and this whole UI is Server
+# Actions — so a missing entry breaks every button on a page that otherwise
+# renders perfectly. Next wants bare hosts here, and a pasted URL is the obvious
+# mistake to make; rejected rather than accepted-and-ignored.
+allowed_origins="$(snapctl get allowed-origins || true)"
+case "${allowed_origins}" in
+  *://*|*/*)
+    fail "allowed-origins takes bare hostnames, not URLs — \"nas.local,10.0.0.5\", not \"http://nas.local\""
+    ;;
+esac
+
+# ----------------------------------------------------------------- spool-dir
+# Whole audiobooks land here before upload and are kept so a retry need not
+# fetch them again, so it is the one path that may need to be somewhere other
+# than the root filesystem. Confinement bounds where that can be: the snap's own
+# writable area always, and removable media once the interface is connected.
+spool_dir="$(snapctl get spool-dir || true)"
+if [ -n "${spool_dir}" ]; then
+  case "${spool_dir}" in
+    /*) ;;
+    *) fail "spool-dir must be an absolute path, not \"${spool_dir}\"" ;;
+  esac
+  case "${spool_dir}" in
+    "${SNAP_COMMON}"|"${SNAP_COMMON}"/*) ;;
+    /media/*|/run/media/*|/mnt/*)
+      # Reachable only once connected, and a denial at transfer time reads as a
+      # disk error rather than a missing interface.
+      echo "abs-sync: spool-dir is on removable media; connect the interface with:" >&2
+      echo "  sudo snap connect ${SNAP_INSTANCE_NAME}:removable-media" >&2
+      ;;
+    *)
+      fail "spool-dir must be under ${SNAP_COMMON} or on removable media (/media, /mnt) — confinement denies writes elsewhere"
+      ;;
+  esac
+fi
+
+# ------------------------------------------------------------------- write it
+# Sourced by the launchers with `set -a`, so every value is single-quoted with
+# embedded quotes escaped. Only keys with a value are written: an empty one has
+# to leave whatever abs-sync.env set alone rather than blanking it.
+config="${SNAP_DATA}/config.env"
+tmp="${config}.new"
+
+umask 077
+mkdir -p "${SNAP_DATA}"
+: > "${tmp}"
+
+emit() {
+  [ -n "${2:-}" ] || return 0
+  printf "%s='%s'\n" "$1" "$(printf '%s' "$2" | sed "s/'/'\\\\''/g")" >> "${tmp}"
+}
+
+emit ABS_SYNC_SECRET "$(snapctl get secret || true)"
+emit PORT "${port}"
+emit ABS_SYNC_ALLOWED_ORIGINS "${allowed_origins}"
+emit ABS_SYNC_SPOOL_DIR "${spool_dir}"
+
+mv "${tmp}" "${config}"
+
+# The service reads all of this at boot — ABS_SYNC_ALLOWED_ORIGINS in
+# next.config.ts, the port in the listen call — so a `snap set` that did not
+# restart would be a change that appears to have been accepted and has not
+# happened. Skipped during install, where the service has not started yet.
+state="$(snapctl services "${SNAP_INSTANCE_NAME}.server" 2>/dev/null | awk 'NR > 1 { print $3 }')"
+if [ "${state}" = "active" ]; then
+  snapctl restart "${SNAP_INSTANCE_NAME}.server"
+fi

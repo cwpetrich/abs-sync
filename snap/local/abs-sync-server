@@ -1,0 +1,19 @@
+#!/bin/sh
+# The abs-sync service: check, migrate, then hand the process over to Next.
+#
+# `exec` at the end matters. It makes the server the process systemd signals, so
+# `snap stop` reaches Next directly and an in-flight upload gets the whole
+# stop-timeout to finish rather than being killed at some arbitrary byte.
+set -eu
+
+# shellcheck disable=SC1091
+. "${SNAP}/bin/abs-sync-common"
+
+# Idempotent, and the only way a first boot gets a schema at all. Running it on
+# every start is also what makes `snap refresh` upgrade the database along with
+# the code, with no second command to remember.
+echo "[abs-sync] applying database migrations"
+"${SNAP}/app/node_modules/.bin/prisma" migrate deploy
+
+echo "[abs-sync] starting server on ${HOSTNAME}:${PORT}"
+exec "${SNAP}/app/node_modules/.bin/next" start
